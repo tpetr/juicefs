@@ -269,6 +269,21 @@ juicefs format \
 The format of the option `--bucket` for all S3 compatible object storage services is `https://<bucket>.<endpoint>` or `https://<endpoint>/<bucket>`. The default `region` is `us-east-1`. When a different `region` is required, it can be set manually via the environment variable `AWS_REGION` or `AWS_DEFAULT_REGION`.
 :::
 
+### Use a prefix within a bucket
+
+`--bucket-prefix` keeps multiple JuiceFS volumes in separate namespaces within one bucket. It is a relative, immutable prefix and is distinct from `--bucket`: JuiceFS appends the volume name as the final namespace segment.
+
+```shell
+juicefs format \
+  --storage=s3 \
+  --bucket=https://prod-default-wf-storage.s3.us-west-2.amazonaws.com \
+  --bucket-prefix=juicefs/v1/TENANT/DEPLOYMENT_ID/WORKFLOW_NAME/WORKFLOW_UID \
+  META-URL \
+  workspace
+```
+
+This stores the volume under `juicefs/v1/TENANT/DEPLOYMENT_ID/WORKFLOW_NAME/WORKFLOW_UID/workspace/`. Grant bucket IAM permissions for object operations and constrain `ListBucket` to that effective prefix.
+
 :::tip
 For AWS SDK request and response checksums, JuiceFS sets `AWS_REQUEST_CHECKSUM_CALCULATION` and `AWS_RESPONSE_CHECKSUM_VALIDATION` to `when_required` by default. As a result, SDK-level checksum headers are only sent or validated when required by S3. This improves compatibility with S3-compatible services.
 

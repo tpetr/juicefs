@@ -178,7 +178,7 @@ func (p *withPrefix) Put(ctx context.Context, key string, in io.Reader, getters 
 }
 
 func (p *withPrefix) Copy(ctx context.Context, dst, src string) error {
-	return p.os.Copy(ctx, dst, src)
+	return p.os.Copy(ctx, p.prefix+dst, p.prefix+src)
 }
 
 func (p *withPrefix) Delete(ctx context.Context, key string, getters ...AttrGetter) error {
@@ -259,9 +259,17 @@ func (p *withPrefix) CompleteUpload(ctx context.Context, key string, uploadID st
 }
 
 func (p *withPrefix) ListUploads(ctx context.Context, marker string) ([]*PendingPart, string, error) {
+	if marker != "" {
+		marker = p.prefix + marker
+	}
 	parts, nextMarker, err := p.os.ListUploads(ctx, marker)
 	for _, part := range parts {
-		part.Key = part.Key[len(p.prefix):]
+		if strings.HasPrefix(part.Key, p.prefix) {
+			part.Key = part.Key[len(p.prefix):]
+		}
+	}
+	if strings.HasPrefix(nextMarker, p.prefix) {
+		nextMarker = nextMarker[len(p.prefix):]
 	}
 	return parts, nextMarker, err
 }

@@ -164,7 +164,7 @@ func config(ctx *cli.Context) error {
 	removePassword(ctx.Args().Get(0))
 	m := meta.NewClient(ctx.Args().Get(0), nil)
 
-	format, err := m.Load(false)
+	format, err := m.Load(true)
 	if err != nil {
 		return err
 	}
@@ -228,6 +228,8 @@ func config(ctx *cli.Context) error {
 				format.Bucket = new
 				storage = true
 			}
+		case "bucket-prefix":
+			return fmt.Errorf("bucket-prefix is immutable and can only be set when formatting a new volume")
 		case "access-key":
 			if ctx.IsSet("tier") {
 				continue

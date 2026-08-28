@@ -81,6 +81,7 @@ type Format struct {
 	StorageClass      string `json:",omitempty"`
 	Tiers             object.Tiers
 	Bucket            string
+	BucketPrefix      string `json:",omitempty"`
 	AccessKey         string `json:",omitempty"`
 	SecretKey         string `json:",omitempty"`
 	SessionToken      string `json:",omitempty"`
@@ -113,6 +114,9 @@ type Format struct {
 }
 
 func (f *Format) update(old *Format, force bool) error {
+	if f.BucketPrefix != old.BucketPrefix {
+		return fmt.Errorf("cannot update volume bucket prefix from %v to %v", old.BucketPrefix, f.BucketPrefix)
+	}
 	if force {
 		logger.Warnf("Existing volume will be overwrited: %s", old)
 	} else {
@@ -168,12 +172,18 @@ func (f *Format) String() string {
 }
 
 func (f *Format) CheckVersion() error {
-	if f.MetaVersion > MaxVersion {
+	ver := version.GetVersion()
+	return f.checkVersion(MaxVersion, &ver)
+}
+
+func (f *Format) checkVersion(maxVersion int, ver *version.Semver) error {
+	if f.MetaVersion > maxVersion {
 		return fmt.Errorf("incompatible metadata version: %d; please upgrade the client", f.MetaVersion)
 	}
-
-	ver := version.GetVersion()
-	return f.CheckCliVersion(&ver)
+	if f.BucketPrefix != "" && f.MetaVersion < BucketPrefixMetaVersion {
+		return fmt.Errorf("bucket prefix requires metadata version %d or later", BucketPrefixMetaVersion)
+	}
+	return f.CheckCliVersion(ver)
 }
 
 func (f *Format) CheckCliVersion(ver *version.Semver) error {
