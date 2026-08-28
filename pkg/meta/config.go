@@ -114,6 +114,9 @@ type Format struct {
 }
 
 func (f *Format) update(old *Format, force bool) error {
+	if f.BucketPrefix != old.BucketPrefix {
+		return fmt.Errorf("cannot update volume bucket prefix from %v to %v", old.BucketPrefix, f.BucketPrefix)
+	}
 	if force {
 		logger.Warnf("Existing volume will be overwrited: %s", old)
 	} else {
@@ -129,8 +132,6 @@ func (f *Format) update(old *Format, force bool) error {
 			args = []interface{}{"shards", old.Shards, f.Shards}
 		case f.HashPrefix != old.HashPrefix:
 			args = []interface{}{"hash prefix", old.HashPrefix, f.HashPrefix}
-		case f.BucketPrefix != old.BucketPrefix:
-			args = []interface{}{"bucket prefix", old.BucketPrefix, f.BucketPrefix}
 		case f.MetaVersion != old.MetaVersion:
 			args = []interface{}{"meta version", old.MetaVersion, f.MetaVersion}
 		}

@@ -102,6 +102,9 @@ func TestFormatUpdateBucketPrefix(t *testing.T) {
 	if err := (&Format{Name: "test", BucketPrefix: "two"}).update(old, false); err == nil {
 		t.Fatal("changing bucket prefix should fail")
 	}
+	if err := (&Format{Name: "test", BucketPrefix: "two"}).update(old, true); err == nil {
+		t.Fatal("force-changing bucket prefix should fail")
+	}
 	if err := (&Format{Name: "test"}).update(old, false); err == nil {
 		t.Fatal("removing bucket prefix should fail")
 	}
