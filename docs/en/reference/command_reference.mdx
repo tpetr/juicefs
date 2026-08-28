@@ -176,6 +176,7 @@ juicefs format sqlite3://myjfs.db myjfs --trash-days=0
 |-|-|
 |`--storage=file`|Object storage type (e.g. `s3`, `gs`, `oss`, `cos`) (default: `file`, refer to [documentation](../reference/how_to_set_up_object_storage.md#supported-object-storage) for all supported object storage types)|
 |`--bucket=/var/jfs`|A bucket URL to store data (default: `$HOME/.juicefs/local` or `/var/jfs`)|
+|`--bucket-prefix=value`|An immutable, relative prefix inside the bucket. JuiceFS stores this volume below `<bucket-prefix>/<volume-name>/`; omit it for the existing `<volume-name>/` layout. This is distinct from the bucket URL.|
 |`--access-key=value`|Access Key for object storage (can also be set via the environment variable `ACCESS_KEY`), see [How to Set Up Object Storage](../reference/how_to_set_up_object_storage.md#aksk) for more.|
 |`--secret-key value`|Secret Key for object storage (can also be set via the environment variable `SECRET_KEY`), see [How to Set Up Object Storage](../reference/how_to_set_up_object_storage.md#aksk) for more.|
 |`--session-token=value`|session token for object storage, see [How to Set Up Object Storage](../reference/how_to_set_up_object_storage.md#session-token) for more.|
@@ -236,6 +237,7 @@ juicefs config redis://localhost --min-client-version 1.0.0 --max-client-version
 |-|-|
 |`--storage=file` <VersionAdd>1.1</VersionAdd> |Object storage type (e.g. `s3`, `gs`, `oss`, `cos`) (default: `"file"`, refer to [documentation](../reference/how_to_set_up_object_storage.md#supported-object-storage) for all supported object storage types).|
 |`--bucket=/var/jfs`|A bucket URL to store data (default: `$HOME/.juicefs/local` or `/var/jfs`)|
+|`--bucket-prefix=value`|Immutable prefix set only during `juicefs format`; it cannot be changed with `juicefs config`.|
 |`--access-key=value`|Access Key for object storage (can also be set via the environment variable `ACCESS_KEY`), see [How to Set Up Object Storage](../reference/how_to_set_up_object_storage.md#aksk) for more.|
 |`--secret-key value`|Secret Key for object storage (can also be set via the environment variable `SECRET_KEY`), see [How to Set Up Object Storage](../reference/how_to_set_up_object_storage.md#aksk) for more.|
 |`--session-token=value`|session token for object storage, see [How to Set Up Object Storage](../reference/how_to_set_up_object_storage.md#session-token) for more.|
