@@ -19,8 +19,14 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -31,6 +37,125 @@ import (
 type unsupportedTierStorage struct {
 	object.ObjectStorage
 	initCalls *int
+}
+
+func TestBucketPrefix(t *testing.T) {
+	for _, test := range []struct {
+		prefix string
+		want   string
+	}{
+		{"juicefs/v1/default", "juicefs/v1/default"},
+		{"juicefs/v1/default/", "juicefs/v1/default"},
+	} {
+		got, err := normalizeBucketPrefix(test.prefix)
+		if err != nil || got != test.want {
+			t.Fatalf("normalizeBucketPrefix(%q) = %q, %v; want %q, nil", test.prefix, got, err, test.want)
+		}
+	}
+	for _, prefix := range []string{"", "/root", "a//b", "a/./b", "a/../b", "a?b", "a#b", "a\\b", "a b", "a\nb"} {
+		if _, err := normalizeBucketPrefix(prefix); err == nil {
+			t.Errorf("normalizeBucketPrefix(%q) succeeded", prefix)
+		}
+	}
+
+	for _, test := range []struct {
+		format meta.Format
+		want   string
+	}{
+		{meta.Format{Name: "workspace"}, "workspace/"},
+		{meta.Format{Name: "workspace", BucketPrefix: "juicefs/v1/default/"}, "juicefs/v1/default/workspace/"},
+	} {
+		got, err := effectiveBucketPrefix(test.format)
+		if err != nil || got != test.want {
+			t.Errorf("effectiveBucketPrefix(%+v) = %q, %v; want %q, nil", test.format, got, err, test.want)
+		}
+	}
+}
+
+func TestCreateStorageBucketPrefix(t *testing.T) {
+	ctx := context.Background()
+	format := meta.Format{Name: "workspace", Storage: "mem", Bucket: "bucket-prefix-test", BucketPrefix: "juicefs/v1/default", Tiers: object.NewTiers("")}
+	storage, err := createStorage(format)
+	if err != nil {
+		t.Fatalf("create storage: %s", err)
+	}
+	base, err := object.CreateStorage("mem", format.Bucket, "", "", "")
+	if err != nil {
+		t.Fatalf("create base storage: %s", err)
+	}
+	key := "chunks/key"
+	fullKey := "juicefs/v1/default/workspace/" + key
+	if err = storage.Put(ctx, key, strings.NewReader("data")); err != nil {
+		t.Fatalf("put object: %s", err)
+	}
+	if _, err = base.Head(ctx, fullKey); err != nil {
+		t.Fatalf("object was not stored under the effective prefix: %s", err)
+	}
+	if _, err = base.Head(ctx, key); err == nil {
+		t.Fatal("object was stored outside the effective prefix")
+	}
+	if _, err = storage.Head(ctx, key); err != nil {
+		t.Fatalf("head object: %s", err)
+	}
+	r, err := storage.Get(ctx, key, 0, -1)
+	if err != nil {
+		t.Fatalf("get object: %s", err)
+	}
+	data, err := io.ReadAll(r)
+	r.Close()
+	if err != nil || string(data) != "data" {
+		t.Fatalf("get object = %q, %v", data, err)
+	}
+	objects, _, _, err := storage.List(ctx, "", "", "", "", 10, false)
+	if err != nil || len(objects) != 1 || objects[0].Key() != key {
+		t.Fatalf("list objects = %+v, %v", objects, err)
+	}
+	if err = storage.Delete(ctx, key); err != nil {
+		t.Fatalf("delete object: %s", err)
+	}
+	if _, err = base.Head(ctx, fullKey); err == nil {
+		t.Fatal("delete did not use the effective prefix")
+	}
+}
+
+func TestCreateStorageBucketPrefixShardedAndEncrypted(t *testing.T) {
+	ctx := context.Background()
+	sharded := meta.Format{Name: "workspace", Storage: "mem", Bucket: "bucket-prefix-sharded-%d", BucketPrefix: "juicefs/v1/default", Shards: 2, Tiers: object.NewTiers("")}
+	storage, err := createStorage(sharded)
+	if err != nil {
+		t.Fatalf("create sharded storage: %s", err)
+	}
+	if err = storage.Put(ctx, "key", strings.NewReader("data")); err != nil {
+		t.Fatalf("put sharded object: %s", err)
+	}
+	found := false
+	for i := 0; i < sharded.Shards; i++ {
+		base, _ := object.CreateStorage("mem", fmt.Sprintf("bucket-prefix-sharded-%d", i), "", "", "")
+		if _, err = base.Head(ctx, "juicefs/v1/default/workspace/key"); err == nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("sharded object was not stored under the effective prefix")
+	}
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %s", err)
+	}
+	pemKey := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	encrypted := meta.Format{Name: "workspace", Storage: "mem", Bucket: "bucket-prefix-encrypted", BucketPrefix: "juicefs/v1/default", EncryptKey: string(pemKey), EncryptAlgo: object.AES256GCM_RSA, Tiers: object.NewTiers("")}
+	storage, err = createStorage(encrypted)
+	if err != nil {
+		t.Fatalf("create encrypted storage: %s", err)
+	}
+	if err = storage.Put(ctx, "key", strings.NewReader("data")); err != nil {
+		t.Fatalf("put encrypted object: %s", err)
+	}
+	base, _ := object.CreateStorage("mem", encrypted.Bucket, "", "", "")
+	if _, err = base.Head(ctx, "juicefs/v1/default/workspace/key"); err != nil {
+		t.Fatalf("encrypted object was not stored under the effective prefix: %s", err)
+	}
 }
 
 func (s *unsupportedTierStorage) InitTiers(_ object.Tiers) error {

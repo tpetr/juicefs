@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dustin/go-humanize"
 	"github.com/google/uuid"
@@ -127,6 +128,10 @@ func formatStorageFlags() []cli.Flag {
 			Usage: "the bucket URL of object storage to store data",
 		},
 		&cli.StringFlag{
+			Name:  "bucket-prefix",
+			Usage: "relative prefix in the bucket; immutable after format",
+		},
+		&cli.StringFlag{
 			Name:  "access-key",
 			Usage: "access key for object storage (env ACCESS_KEY)",
 		},
@@ -147,6 +152,41 @@ func formatStorageFlags() []cli.Flag {
 			Usage: "custom tag when uploading object storage (e.g. --tag key=value)",
 		},
 	})
+}
+
+const bucketPrefixExample = "juicefs/v1/default/123/runtime-demo/550e8400-e29b-41d4-a716-446655440000"
+
+func normalizeBucketPrefix(prefix string) (string, error) {
+	if prefix == "" {
+		return "", fmt.Errorf("bucket prefix cannot be empty; omit --bucket-prefix or use a relative prefix such as %q", bucketPrefixExample)
+	}
+	if strings.HasPrefix(prefix, "/") {
+		return "", fmt.Errorf("invalid bucket prefix %q: it must be relative; use a prefix such as %q", prefix, bucketPrefixExample)
+	}
+	if strings.ContainsAny(prefix, "?#\\") || strings.ContainsFunc(prefix, unicode.IsControl) || strings.ContainsFunc(prefix, unicode.IsSpace) {
+		return "", fmt.Errorf("invalid bucket prefix %q: URL syntax, whitespace, and control characters are not allowed; use a relative prefix such as %q", prefix, bucketPrefixExample)
+	}
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return "", fmt.Errorf("invalid bucket prefix: it cannot be empty; use a relative prefix such as %q", bucketPrefixExample)
+	}
+	for _, component := range strings.Split(prefix, "/") {
+		if component == "" || component == "." || component == ".." {
+			return "", fmt.Errorf("invalid bucket prefix %q: empty, . and .. path components are not allowed; use a relative prefix such as %q", prefix, bucketPrefixExample)
+		}
+	}
+	return prefix, nil
+}
+
+func effectiveBucketPrefix(format meta.Format) (string, error) {
+	if format.BucketPrefix == "" {
+		return format.Name + "/", nil
+	}
+	prefix, err := normalizeBucketPrefix(format.BucketPrefix)
+	if err != nil {
+		return "", err
+	}
+	return prefix + "/" + format.Name + "/", nil
 }
 
 func formatFlags() []cli.Flag {
@@ -284,7 +324,11 @@ func createStorage(format meta.Format) (object.ObjectStorage, error) {
 	if err != nil {
 		return nil, err
 	}
-	blob = object.WithPrefix(blob, format.Name+"/")
+	prefix, err := effectiveBucketPrefix(format)
+	if err != nil {
+		return nil, err
+	}
+	blob = object.WithPrefix(blob, prefix)
 	initStorageTiers(blob, format.Tiers)
 	if format.EncryptKey != "" {
 		privKey, err := object.ParsePrivateKeyFromPem([]byte(format.EncryptKey), []byte(os.Getenv("JFS_RSA_PASSPHRASE")))
@@ -451,9 +495,18 @@ func format(c *cli.Context) error {
 	if v := c.Int("shards"); v > 256 {
 		logger.Fatalf("too many shards: %d", v)
 	}
+	if c.IsSet("bucket-prefix") {
+		prefix, err := normalizeBucketPrefix(c.String("bucket-prefix"))
+		if err != nil {
+			return err
+		}
+		if err = c.Set("bucket-prefix", prefix); err != nil {
+			return err
+		}
+	}
 
 	var create, encrypted bool
-	format, err := m.Load(false)
+	format, err := m.Load(true)
 	if err == nil {
 		if c.Bool("no-update") {
 			return nil
@@ -467,6 +520,8 @@ func format(c *cli.Context) error {
 				format.Inodes = c.Uint64(flag)
 			case "bucket":
 				format.Bucket = c.String(flag)
+			case "bucket-prefix":
+				format.BucketPrefix = c.String(flag)
 			case "access-key":
 				format.AccessKey = c.String(flag)
 			case "secret-key":
@@ -512,6 +567,7 @@ func format(c *cli.Context) error {
 			StorageClass:     c.String("storage-class"),
 			Tiers:            object.NewTiers(""),
 			Bucket:           c.String("bucket"),
+			BucketPrefix:     c.String("bucket-prefix"),
 			AccessKey:        c.String("access-key"),
 			SecretKey:        c.String("secret-key"),
 			SessionToken:     c.String("session-token"),
@@ -526,12 +582,15 @@ func format(c *cli.Context) error {
 			TrashDays:        c.Int("trash-days"),
 			DirStats:         true,
 			UserGroupQuota:   false,
-			MetaVersion:      meta.MaxVersion,
+			MetaVersion:      1,
 			MinClientVersion: "1.1.0-A",
 			EnableACL:        c.Bool("enable-acl"),
 			RangerRestUrl:    c.String("ranger-rest-url"),
 			RangerService:    c.String("ranger-service"),
 			KerbConf:         readKerbConf(c.String("kerberos-config-file")),
+		}
+		if format.BucketPrefix != "" {
+			format.MetaVersion = meta.BucketPrefixMetaVersion
 		}
 		if sc := c.String("storage-class"); sc != "" {
 			format.Tiers[0] = object.Tier{

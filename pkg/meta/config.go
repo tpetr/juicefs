@@ -81,6 +81,7 @@ type Format struct {
 	StorageClass      string `json:",omitempty"`
 	Tiers             object.Tiers
 	Bucket            string
+	BucketPrefix      string `json:",omitempty"`
 	AccessKey         string `json:",omitempty"`
 	SecretKey         string `json:",omitempty"`
 	SessionToken      string `json:",omitempty"`
@@ -128,6 +129,8 @@ func (f *Format) update(old *Format, force bool) error {
 			args = []interface{}{"shards", old.Shards, f.Shards}
 		case f.HashPrefix != old.HashPrefix:
 			args = []interface{}{"hash prefix", old.HashPrefix, f.HashPrefix}
+		case f.BucketPrefix != old.BucketPrefix:
+			args = []interface{}{"bucket prefix", old.BucketPrefix, f.BucketPrefix}
 		case f.MetaVersion != old.MetaVersion:
 			args = []interface{}{"meta version", old.MetaVersion, f.MetaVersion}
 		}
@@ -168,12 +171,18 @@ func (f *Format) String() string {
 }
 
 func (f *Format) CheckVersion() error {
-	if f.MetaVersion > MaxVersion {
+	ver := version.GetVersion()
+	return f.checkVersion(MaxVersion, &ver)
+}
+
+func (f *Format) checkVersion(maxVersion int, ver *version.Semver) error {
+	if f.MetaVersion > maxVersion {
 		return fmt.Errorf("incompatible metadata version: %d; please upgrade the client", f.MetaVersion)
 	}
-
-	ver := version.GetVersion()
-	return f.CheckCliVersion(&ver)
+	if f.BucketPrefix != "" && f.MetaVersion < BucketPrefixMetaVersion {
+		return fmt.Errorf("bucket prefix requires metadata version %d or later", BucketPrefixMetaVersion)
+	}
+	return f.CheckCliVersion(ver)
 }
 
 func (f *Format) CheckCliVersion(ver *version.Semver) error {

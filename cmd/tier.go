@@ -184,9 +184,8 @@ func setTier(ctx *cli.Context) error {
 			}
 		}
 
-		fullPath := format.Name + "/" + key
 		ctx := context.WithValue(context.Background(), object.TierKey{}, uint8(id))
-		return blob.Copy(ctx, fullPath, fullPath)
+		return blob.Copy(ctx, key, key)
 	}
 	checkFunc := func(ino meta.Ino, oriTier uint8) bool {
 		if id == uint(oriTier) && !ctx.Bool("force") {
