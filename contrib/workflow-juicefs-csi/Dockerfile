@@ -12,6 +12,7 @@ COPY contrib/workflow-juicefs-csi/go.mod contrib/workflow-juicefs-csi/go.sum ./
 RUN go mod download
 COPY contrib/workflow-juicefs-csi/ .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/workflow-juicefs-csi-driver ./cmd/workflow-juicefs-csi-driver
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/workspace-csi-control ./cmd/workspace-csi-control
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -19,4 +20,5 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=juicefs-builder /src/juicefs /usr/local/bin/juicefs
 COPY --from=driver-builder /out/workflow-juicefs-csi-driver /usr/local/bin/workflow-juicefs-csi-driver
+COPY --from=driver-builder /out/workspace-csi-control /usr/local/bin/workspace-csi-control
 ENTRYPOINT ["/usr/local/bin/workflow-juicefs-csi-driver"]

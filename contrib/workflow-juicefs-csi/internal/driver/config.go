@@ -32,13 +32,18 @@ type Config struct {
 	Endpoint              string
 	NodeID                string
 	KubeletRoot           string
+	KubeletAccessRoot     string
 	StateRoot             string
 	JuiceFSPath           string
 	Bucket                string
 	Region                string
 	ObjectPrefix          string
+	Tenant                string
 	AllowedNamespace      string
 	AllowedServiceAccount string
+	LeaseNamespace        string
+	LeaseDuration         time.Duration
+	LeaseRenewInterval    time.Duration
 	MountTimeout          time.Duration
 	UnmountTimeout        time.Duration
 }
@@ -48,14 +53,14 @@ func (c Config) Validate() error {
 		return fmt.Errorf("endpoint must use unix://")
 	}
 	for name, value := range map[string]string{
-		"node-id": c.NodeID, "bucket": c.Bucket, "allowed-namespace": c.AllowedNamespace,
-		"allowed-service-account": c.AllowedServiceAccount,
+		"node-id": c.NodeID, "bucket": c.Bucket, "tenant": c.Tenant, "allowed-namespace": c.AllowedNamespace,
+		"allowed-service-account": c.AllowedServiceAccount, "lease-namespace": c.LeaseNamespace,
 	} {
 		if value == "" {
 			return fmt.Errorf("%s must not be empty", name)
 		}
 	}
-	for name, value := range map[string]string{"kubelet-root": c.KubeletRoot, "state-root": c.StateRoot, "juicefs-path": c.JuiceFSPath} {
+	for name, value := range map[string]string{"kubelet-root": c.KubeletRoot, "kubelet-access-root": c.KubeletAccessRoot, "state-root": c.StateRoot, "juicefs-path": c.JuiceFSPath} {
 		if !filepath.IsAbs(value) || filepath.Clean(value) != value {
 			return fmt.Errorf("%s must be an absolute canonical path", name)
 		}
@@ -65,6 +70,12 @@ func (c Config) Validate() error {
 	}
 	if c.MountTimeout <= 0 || c.UnmountTimeout <= 0 {
 		return fmt.Errorf("timeouts must be positive")
+	}
+	if c.LeaseDuration < 30*time.Second || c.LeaseRenewInterval <= 0 || c.LeaseRenewInterval*2 >= c.LeaseDuration {
+		return fmt.Errorf("lease duration must be at least 30s and more than twice the positive renewal interval")
+	}
+	if err := validateComponent(c.Tenant); err != nil {
+		return fmt.Errorf("tenant: %w", err)
 	}
 	return nil
 }

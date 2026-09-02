@@ -27,15 +27,23 @@ import (
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	podNameKey           = "csi.storage.k8s.io/pod.name"
-	podNamespaceKey      = "csi.storage.k8s.io/pod.namespace"
-	podUIDKey            = "csi.storage.k8s.io/pod.uid"
-	serviceAccountKey    = "csi.storage.k8s.io/serviceAccount.name"
-	ephemeralKey         = "csi.storage.k8s.io/ephemeral"
-	architectureTestPath = "architecture"
+	podNameKey         = "csi.storage.k8s.io/pod.name"
+	podNamespaceKey    = "csi.storage.k8s.io/pod.namespace"
+	podUIDKey          = "csi.storage.k8s.io/pod.uid"
+	serviceAccountKey  = "csi.storage.k8s.io/serviceAccount.name"
+	ephemeralKey       = "csi.storage.k8s.io/ephemeral"
+	deploymentIDKey    = "deploymentID"
+	workflowNameKey    = "workflowName"
+	workflowUIDKey     = "workflowUID"
+	controlEmptyDirKey = "controlEmptyDirName"
+	deploymentIDAnno   = "workspaces.semgrep.dev/deployment-id"
+	workflowNameAnno   = "workspaces.semgrep.dev/workflow-name"
+	workflowUIDAnno    = "workspaces.semgrep.dev/workflow-uid"
 )
 
 func (s *service) NodePublishVolume(ctx context.Context, req *csipb.NodePublishVolumeRequest) (*csipb.NodePublishVolumeResponse, error) {
@@ -48,7 +56,7 @@ func (s *service) NodePublishVolume(ctx context.Context, req *csipb.NodePublishV
 	if err := validateCapability(req.GetVolumeCapability()); err != nil {
 		return nil, err
 	}
-	pod, err := s.validateRequest(req.GetTargetPath(), req.GetVolumeContext())
+	pod, err := s.validateRequest(ctx, req.GetTargetPath(), req.GetVolumeContext())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -70,9 +78,20 @@ func (s *service) NodePublishVolume(ctx context.Context, req *csipb.NodePublishV
 	if s.session(req.GetVolumeId()) != nil {
 		return nil, status.Error(codes.Aborted, "volume session already exists without its target mount; inspect the node plugin")
 	}
+	logger := s.logger.With("operation", "NodePublishVolume", "volume_id", shortID(req.GetVolumeId()), "pod_uid", pod.uid, "workspace", pod.workspaceHash)
+	lease, err := acquireLease(ctx, s.kube, s.config, pod.workspaceHash, shortID(s.config.NodeID+"/"+req.GetVolumeId()+"/"+pod.uid), logger)
+	if err != nil {
+		switch {
+		case errors.Is(err, errLeaseHeld):
+			return nil, status.Errorf(codes.Aborted, "workspace lease held for %s; retry=true: %v", pod.workspaceHash, err)
+		case errors.Is(err, errAmbiguousLease):
+			return nil, status.Errorf(codes.FailedPrecondition, "workspace lease ambiguous for %s; retry=false; inspect Lease and prior node: %v", pod.workspaceHash, err)
+		default:
+			return nil, status.Errorf(codes.Internal, "workspace lease acquisition failed for %s; retry=true: %v", pod.workspaceHash, err)
+		}
+	}
 
-	logger := s.logger.With("operation", "NodePublishVolume", "volume_id", shortID(req.GetVolumeId()), "pod_uid", pod.uid)
-	session, err := startMount(ctx, s.config, req.GetVolumeId(), req.GetTargetPath(), pod, logger)
+	session, err := startMount(ctx, s.config, req.GetVolumeId(), req.GetTargetPath(), pod, lease, s.objects, logger)
 	if err != nil {
 		logger.Error("publish failed", "stage", "mount_and_bind", "retry", true, "error", err)
 		return nil, status.Errorf(codes.Internal, "mount_and_bind failed for volume %s; retry=true; inspect node-plugin logs: %v", shortID(req.GetVolumeId()), err)
@@ -104,6 +123,9 @@ func (s *service) NodeUnpublishVolume(ctx context.Context, req *csipb.NodeUnpubl
 		if mounted {
 			return nil, status.Error(codes.FailedPrecondition, "target is mounted but the driver session was lost; automatic restart recovery is intentionally not implemented in Phase 1")
 		}
+		if _, err = os.Stat(filepath.Join(s.config.StateRoot, shortID(req.GetVolumeId()), "state.json")); err == nil {
+			return nil, status.Error(codes.FailedPrecondition, "persistent volume state exists but the in-memory session was lost; restart recovery is not implemented and the workspace must be inspected")
+		}
 		return &csipb.NodeUnpublishVolumeResponse{}, nil
 	}
 	if session.targetPath != req.GetTargetPath() {
@@ -119,14 +141,19 @@ func (s *service) NodeUnpublishVolume(ctx context.Context, req *csipb.NodeUnpubl
 }
 
 type podIdentity struct {
-	name             string
-	namespace        string
-	uid              string
-	serviceAccount   string
-	objectDataPrefix string
+	name            string
+	namespace       string
+	uid             string
+	serviceAccount  string
+	deploymentID    string
+	workflowName    string
+	workflowUID     string
+	workspacePrefix string
+	workspaceHash   string
+	controlDir      string
 }
 
-func (s *service) validateRequest(target string, attributes map[string]string) (podIdentity, error) {
+func (s *service) validateRequest(ctx context.Context, target string, attributes map[string]string) (podIdentity, error) {
 	podUID, _, err := parseTarget(s.config.KubeletRoot, target)
 	if err != nil {
 		return podIdentity{}, err
@@ -139,6 +166,9 @@ func (s *service) validateRequest(target string, attributes map[string]string) (
 		namespace:      attributes[podNamespaceKey],
 		uid:            attributes[podUIDKey],
 		serviceAccount: attributes[serviceAccountKey],
+		deploymentID:   attributes[deploymentIDKey],
+		workflowName:   attributes[workflowNameKey],
+		workflowUID:    attributes[workflowUIDKey],
 	}
 	if pod.name == "" || pod.namespace == "" || pod.uid == "" || pod.serviceAccount == "" {
 		return podIdentity{}, fmt.Errorf("trusted CSI pod metadata is incomplete")
@@ -149,14 +179,46 @@ func (s *service) validateRequest(target string, attributes map[string]string) (
 	if pod.namespace != s.config.AllowedNamespace || pod.serviceAccount != s.config.AllowedServiceAccount {
 		return podIdentity{}, fmt.Errorf("pod namespace or service account is not allowed")
 	}
-	if err := validateComponent(pod.uid); err != nil {
-		return podIdentity{}, fmt.Errorf("pod UID: %w", err)
+	for name, value := range map[string]string{"pod UID": pod.uid, "deployment ID": pod.deploymentID, "workflow name": pod.workflowName, "workflow UID": pod.workflowUID} {
+		if err := validateComponent(value); err != nil {
+			return podIdentity{}, fmt.Errorf("%s: %w", name, err)
+		}
 	}
-	pod.objectDataPrefix = strings.Join([]string{s.config.ObjectPrefix, architectureTestPath, pod.namespace, pod.uid}, "/")
-	if err := validateRelativePrefix(pod.objectDataPrefix); err != nil {
+	controlName := attributes[controlEmptyDirKey]
+	if err := validateComponent(controlName); err != nil {
+		return podIdentity{}, fmt.Errorf("control EmptyDir name: %w", err)
+	}
+	actual, err := s.kube.CoreV1().Pods(pod.namespace).Get(ctx, pod.name, metav1.GetOptions{})
+	if err != nil {
+		return podIdentity{}, fmt.Errorf("get requesting pod: %w", err)
+	}
+	if string(actual.UID) != pod.uid || actual.Spec.ServiceAccountName != pod.serviceAccount || actual.Spec.NodeName != s.config.NodeID {
+		return podIdentity{}, fmt.Errorf("requesting pod UID, service account, or node does not match trusted API state")
+	}
+	for annotation, want := range map[string]string{deploymentIDAnno: pod.deploymentID, workflowNameAnno: pod.workflowName, workflowUIDAnno: pod.workflowUID} {
+		if actual.Annotations[annotation] != want {
+			return podIdentity{}, fmt.Errorf("requesting pod annotation %q does not match the volume attribute", annotation)
+		}
+	}
+	if !podHasEmptyDir(actual, controlName) {
+		return podIdentity{}, fmt.Errorf("requesting pod does not contain control EmptyDir %q", controlName)
+	}
+	pod.workspacePrefix = strings.Join([]string{s.config.ObjectPrefix, s.config.Tenant, pod.deploymentID, pod.workflowName, pod.workflowUID}, "/")
+	if err := validateRelativePrefix(pod.workspacePrefix); err != nil {
 		return podIdentity{}, fmt.Errorf("derived object prefix: %w", err)
 	}
+	pod.workspaceHash = shortID(pod.workspacePrefix)
+	pod.controlDir = filepath.Join(s.config.KubeletAccessRoot, "pods", pod.uid, "volumes", "kubernetes.io~empty-dir", controlName)
 	return pod, nil
+}
+
+func podHasEmptyDir(pod *corev1.Pod, name string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == name && volume.EmptyDir != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTarget(kubeletRoot, target string) (string, string, error) {

@@ -11,3 +11,4 @@ test:
 build:
 	mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -o bin/workflow-juicefs-csi-driver ./cmd/workflow-juicefs-csi-driver
+	CGO_ENABLED=0 go build -trimpath -o bin/workspace-csi-control ./cmd/workspace-csi-control

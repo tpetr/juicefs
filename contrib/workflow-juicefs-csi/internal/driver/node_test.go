@@ -17,8 +17,14 @@
 package driver
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestParseTarget(t *testing.T) {
@@ -42,30 +48,42 @@ func TestParseTarget(t *testing.T) {
 
 func TestValidateRequestUsesOnlyKubeletPodIdentity(t *testing.T) {
 	config := Config{
-		KubeletRoot: "/var/lib/kubelet", ObjectPrefix: "juicefs-csi-poc",
-		AllowedNamespace: "ai-workflows", AllowedServiceAccount: "ai-workflows",
+		KubeletRoot: "/var/lib/kubelet", KubeletAccessRoot: "/k", ObjectPrefix: "juicefs-csi-poc",
+		Tenant: "dev2", NodeID: "node-1", AllowedNamespace: "ai-workflows", AllowedServiceAccount: "ai-workflows",
 	}
-	service := newService(config, nil)
+	podObject := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "proof", Namespace: "ai-workflows", UID: types.UID("uid-1"), Annotations: map[string]string{
+			deploymentIDAnno: "deployment-1", workflowNameAnno: "workflow-1", workflowUIDAnno: "workflow-uid-1",
+		}},
+		Spec: corev1.PodSpec{NodeName: "node-1", ServiceAccountName: "ai-workflows", Volumes: []corev1.Volume{{
+			Name: "control", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}}},
+	}
+	service := &service{config: config, kube: fake.NewSimpleClientset(podObject)}
 	target := "/var/lib/kubelet/pods/uid-1/volumes/kubernetes.io~csi/volume/mount"
 	attributes := map[string]string{
 		ephemeralKey: "true", podNameKey: "proof", podNamespaceKey: "ai-workflows",
-		podUIDKey: "uid-1", serviceAccountKey: "ai-workflows",
+		podUIDKey: "uid-1", serviceAccountKey: "ai-workflows", deploymentIDKey: "deployment-1",
+		workflowNameKey: "workflow-1", workflowUIDKey: "workflow-uid-1", controlEmptyDirKey: "control",
 	}
-	pod, err := service.validateRequest(target, attributes)
+	pod, err := service.validateRequest(context.Background(), target, attributes)
 	if err != nil {
 		t.Fatalf("validateRequest: %v", err)
 	}
-	if pod.objectDataPrefix != "juicefs-csi-poc/architecture/ai-workflows/uid-1" {
-		t.Fatalf("object prefix = %q", pod.objectDataPrefix)
+	if pod.workspacePrefix != "juicefs-csi-poc/dev2/deployment-1/workflow-1/workflow-uid-1" {
+		t.Fatalf("object prefix = %q", pod.workspacePrefix)
+	}
+	if pod.controlDir != "/k/pods/uid-1/volumes/kubernetes.io~empty-dir/control" {
+		t.Fatalf("control directory = %q", pod.controlDir)
 	}
 
 	attributes[podUIDKey] = "another-pod"
-	if _, err = service.validateRequest(target, attributes); err == nil {
+	if _, err = service.validateRequest(context.Background(), target, attributes); err == nil {
 		t.Fatal("mismatched pod UID was accepted")
 	}
 	attributes[podUIDKey] = "uid-1"
 	attributes[serviceAccountKey] = "another-service-account"
-	if _, err = service.validateRequest(target, attributes); err == nil {
+	if _, err = service.validateRequest(context.Background(), target, attributes); err == nil {
 		t.Fatal("unexpected service account was accepted")
 	}
 }

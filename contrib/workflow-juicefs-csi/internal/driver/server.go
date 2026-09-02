@@ -45,7 +45,10 @@ func Run(ctx context.Context, config Config, logger *slog.Logger) error {
 	defer listener.Close()
 	defer os.Remove(socketPath)
 
-	service := newService(config, logger)
+	service, err := newService(ctx, config, logger)
+	if err != nil {
+		return err
+	}
 	server := grpc.NewServer()
 	csipb.RegisterIdentityServer(server, service)
 	csipb.RegisterNodeServer(server, service)

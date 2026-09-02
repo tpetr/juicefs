@@ -20,12 +20,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,8 +45,16 @@ type mountSession struct {
 	targetPath  string
 	privatePath string
 	statePath   string
+	controlDir  string
 	metadataURL string
 	juicefsPath string
+	config      Config
+	state       volumeState
+	stateMu     sync.Mutex
+	lease       *leaseHandle
+	objects     objectStore
+	control     net.Listener
+	controlWG   sync.WaitGroup
 	process     *exec.Cmd
 	processDone chan struct{}
 	processErr  error
@@ -52,7 +63,7 @@ type mountSession struct {
 	logger      *slog.Logger
 }
 
-func startMount(ctx context.Context, config Config, volumeID, target string, pod podIdentity, logger *slog.Logger) (_ *mountSession, returnedErr error) {
+func startMount(ctx context.Context, config Config, volumeID, target string, pod podIdentity, lease *leaseHandle, objects objectStore, logger *slog.Logger) (_ *mountSession, returnedErr error) {
 	statePath := filepath.Join(config.StateRoot, shortID(volumeID))
 	if err := os.MkdirAll(config.StateRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("prepare state root: %w", err)
@@ -60,11 +71,12 @@ func startMount(ctx context.Context, config Config, volumeID, target string, pod
 	if err := ensureNewDirectory(statePath); err != nil {
 		return nil, fmt.Errorf("prepare private state: %w", err)
 	}
-	session := &mountSession{
-		volumeID: volumeID, targetPath: target, statePath: statePath,
-		privatePath: filepath.Join(statePath, "mount"), metadataURL: "sqlite3://" + filepath.Join(statePath, "metadata.db"),
-		juicefsPath: config.JuiceFSPath, processDone: make(chan struct{}), output: newTailBuffer(outputTailLimit), logger: logger,
-	}
+	metadataPath := filepath.Join(statePath, "metadata.db")
+	session := &mountSession{volumeID: volumeID, targetPath: target, statePath: statePath, controlDir: pod.controlDir,
+		privatePath: filepath.Join(statePath, "mount"), metadataURL: "sqlite3://" + metadataPath, juicefsPath: config.JuiceFSPath,
+		config: config, lease: lease, objects: objects, processDone: make(chan struct{}), output: newTailBuffer(outputTailLimit), logger: logger}
+	session.state = volumeState{Version: 1, Phase: "preparing", VolumeID: volumeID, TargetPath: target, PrivateMountPath: session.privatePath,
+		MetadataPath: metadataPath, WorkspacePrefix: pod.workspacePrefix, WorkspaceHash: pod.workspaceHash, PodUID: pod.uid, LeaseName: lease.name}
 	defer func() {
 		if returnedErr != nil {
 			session.rollback()
@@ -78,11 +90,37 @@ func startMount(ctx context.Context, config Config, volumeID, target string, pod
 	if err := os.MkdirAll(target, 0o750); err != nil {
 		return nil, fmt.Errorf("create kubelet target: %w", err)
 	}
+	if err := session.saveState(); err != nil {
+		return nil, fmt.Errorf("persist preparing state: %w", err)
+	}
 
-	bucketURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com", config.Bucket, config.Region)
-	formatArgs := []string{"format", "--storage", "s3", "--bucket", bucketURL, "--bucket-prefix", pod.objectDataPrefix, "--trash-days", "0", session.metadataURL, "data"}
-	if err := runCommand(ctx, config.JuiceFSPath, formatArgs, nil); err != nil {
-		return nil, fmt.Errorf("format fresh SQLite metadata: %w", err)
+	pointer, etag, err := readOrInitializePointer(ctx, objects, session.latestKey())
+	if err != nil {
+		return nil, fmt.Errorf("restore_pointer: %w", err)
+	}
+	session.state.PriorGeneration = pointer.Generation
+	session.state.PointerETag = etag
+	if err = session.saveState(); err != nil {
+		return nil, fmt.Errorf("persist restored pointer state: %w", err)
+	}
+	if pointer.Generation == "" {
+		bucketURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com", config.Bucket, config.Region)
+		formatArgs := []string{"format", "--storage", "s3", "--bucket", bucketURL, "--bucket-prefix", pod.workspacePrefix, "--trash-days", "0", session.metadataURL, "data"}
+		if err = runCommand(ctx, config.JuiceFSPath, formatArgs, nil); err != nil {
+			return nil, fmt.Errorf("format fresh SQLite metadata: %w", err)
+		}
+	} else {
+		generation, _, getErr := objects.get(ctx, session.generationKey(pointer.Generation))
+		if getErr != nil {
+			return nil, fmt.Errorf("download generation %q: %w", pointer.Generation, getErr)
+		}
+		dumpPath := filepath.Join(statePath, "restore.json.gz")
+		if err = os.WriteFile(dumpPath, generation, 0o600); err != nil {
+			return nil, fmt.Errorf("write downloaded metadata generation: %w", err)
+		}
+		if err = runCommand(ctx, config.JuiceFSPath, []string{"load", session.metadataURL, dumpPath}, nil); err != nil {
+			return nil, fmt.Errorf("load metadata generation: %w", err)
+		}
 	}
 
 	mountArgs := []string{"mount", "--foreground", "--no-usage-report", "--cache-dir", filepath.Join(statePath, "cache"), session.metadataURL, session.privatePath}
@@ -94,6 +132,10 @@ func startMount(ctx context.Context, config Config, volumeID, target string, pod
 		return nil, fmt.Errorf("start JuiceFS mount: %w", err)
 	}
 	session.process = cmd
+	session.state.JuiceFSPID = cmd.Process.Pid
+	if err := session.saveState(); err != nil {
+		return nil, fmt.Errorf("persist JuiceFS process identity: %w", err)
+	}
 	go func() {
 		err := cmd.Wait()
 		session.processMu.Lock()
@@ -119,6 +161,16 @@ func startMount(ctx context.Context, config Config, volumeID, target string, pod
 		return nil, fmt.Errorf("read bind-mounted filesystem: %w", err)
 	}
 	logger.Info("JuiceFS mount is readable before publish returns", "root_entry_count", len(entries))
+	if err = session.startControl(); err != nil {
+		return nil, fmt.Errorf("start success-intent control: %w", err)
+	}
+	session.state.Phase = "mounted"
+	if err = session.saveState(); err != nil {
+		return nil, fmt.Errorf("persist mounted state: %w", err)
+	}
+	if err = lease.setPhase(ctx, "mounted"); err != nil {
+		return nil, fmt.Errorf("mark workspace lease mounted: %w", err)
+	}
 	return session, nil
 }
 
@@ -153,6 +205,7 @@ func (s *mountSession) waitReady(ctx context.Context) error {
 func (s *mountSession) stop(ctx context.Context, timeout time.Duration) error {
 	stopCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	s.closeControl()
 	if mounted, err := isMounted(s.targetPath); err != nil {
 		return fmt.Errorf("inspect bind target: %w", err)
 	} else if mounted {
@@ -167,13 +220,37 @@ func (s *mountSession) stop(ctx context.Context, timeout time.Duration) error {
 			return fmt.Errorf("clean JuiceFS unmount: %w", err)
 		}
 	}
-	select {
-	case <-s.processDone:
-		if err := s.exitErr(); err != nil {
-			return fmt.Errorf("JuiceFS process exit: %w; output_tail=%q", err, s.output.String())
+	if s.process != nil {
+		select {
+		case <-s.processDone:
+			if err := s.exitErr(); err != nil {
+				return fmt.Errorf("JuiceFS process exit: %w; output_tail=%q", err, s.output.String())
+			}
+		case <-stopCtx.Done():
+			return fmt.Errorf("wait for JuiceFS process: %w; output_tail=%q", stopCtx.Err(), s.output.String())
 		}
-	case <-stopCtx.Done():
-		return fmt.Errorf("wait for JuiceFS process: %w; output_tail=%q", stopCtx.Err(), s.output.String())
+	}
+	s.stateMu.Lock()
+	success := s.state.SuccessIntent
+	phase := s.state.Phase
+	s.stateMu.Unlock()
+	if success {
+		if phase != "committed" {
+			if err := s.lease.setPhase(stopCtx, "committing"); err != nil {
+				return fmt.Errorf("renew lease before commit: %w", err)
+			}
+			if err := s.commitMetadata(stopCtx); err != nil {
+				return err
+			}
+		}
+	} else {
+		if err := s.lease.setPhase(stopCtx, "discarding"); err != nil {
+			return fmt.Errorf("renew lease before discard: %w", err)
+		}
+		s.logger.Info("discarding metadata because no success intent was recorded")
+	}
+	if err := s.lease.release(stopCtx); err != nil {
+		return fmt.Errorf("release workspace lease: %w", err)
 	}
 	if err := os.RemoveAll(s.statePath); err != nil {
 		return fmt.Errorf("remove private state: %w", err)
@@ -182,6 +259,7 @@ func (s *mountSession) stop(ctx context.Context, timeout time.Duration) error {
 }
 
 func (s *mountSession) rollback() {
+	s.closeControl()
 	if mounted, _ := isMounted(s.targetPath); mounted {
 		_ = runCommand(context.Background(), "/bin/umount", []string{s.targetPath}, nil)
 	}
@@ -199,7 +277,84 @@ func (s *mountSession) rollback() {
 			}
 		}
 	}
+	if s.lease != nil {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = s.lease.release(rollbackCtx)
+		cancel()
+	}
 	_ = os.RemoveAll(s.statePath)
+}
+
+func (s *mountSession) commitMetadata(ctx context.Context) error {
+	s.stateMu.Lock()
+	generation := s.state.UploadedGeneration
+	s.state.Phase = "committing"
+	s.stateMu.Unlock()
+	if err := s.saveState(); err != nil {
+		return fmt.Errorf("persist commit state: %w", err)
+	}
+	if generation == "" {
+		generation = newGenerationName()
+		dumpPath := filepath.Join(s.statePath, generation)
+		if err := runCommand(ctx, s.juicefsPath, []string{"dump", s.metadataURL, dumpPath}, nil); err != nil {
+			return fmt.Errorf("dump SQLite metadata: %w", err)
+		}
+		data, err := os.ReadFile(dumpPath)
+		if err != nil {
+			return fmt.Errorf("read metadata dump: %w", err)
+		}
+		if _, err = s.objects.putIfAbsent(ctx, s.generationKey(generation), data); err != nil {
+			return fmt.Errorf("upload immutable metadata generation: %w", err)
+		}
+		s.stateMu.Lock()
+		s.state.UploadedGeneration = generation
+		s.state.Phase = "generation-uploaded"
+		s.stateMu.Unlock()
+		if err = s.saveState(); err != nil {
+			return fmt.Errorf("persist uploaded generation state: %w", err)
+		}
+		if err = s.lease.setPhase(ctx, "generation-uploaded"); err != nil {
+			return fmt.Errorf("renew lease after generation upload: %w", err)
+		}
+	}
+	pointer := latestPointer{Version: 1, Generation: generation, CommittedBy: shortID(s.state.PodUID), CommittedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	encoded, _ := json.Marshal(pointer)
+	encoded = append(encoded, '\n')
+	newETag, err := s.objects.putIfMatch(ctx, s.latestKey(), s.state.PointerETag, encoded)
+	if err != nil {
+		if errors.Is(err, errObjectPrecondition) {
+			return fmt.Errorf("advance latest pointer: %w; stale writer was rejected and generation remains unreferenced", err)
+		}
+		return fmt.Errorf("advance latest pointer: %w", err)
+	}
+	s.stateMu.Lock()
+	s.state.PointerETag = newETag
+	s.state.Phase = "committed"
+	s.stateMu.Unlock()
+	if err = s.saveState(); err != nil {
+		return fmt.Errorf("persist committed state: %w", err)
+	}
+	if err = s.lease.setPhase(ctx, "committed"); err != nil {
+		return fmt.Errorf("mark lease committed: %w", err)
+	}
+	s.logger.Info("metadata generation committed", "generation", generation)
+	return nil
+}
+
+func (s *mountSession) latestKey() string {
+	return s.state.WorkspacePrefix + "/metadata/latest.json"
+}
+
+func (s *mountSession) generationKey(generation string) string {
+	return s.state.WorkspacePrefix + "/metadata/generations/" + generation
+}
+
+func newGenerationName() string {
+	random := make([]byte, 8)
+	if _, err := rand.Read(random); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return time.Now().UTC().Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(random) + ".json.gz"
 }
 
 func (s *mountSession) exitErr() error {

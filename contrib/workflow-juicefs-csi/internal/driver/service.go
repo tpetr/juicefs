@@ -18,13 +18,18 @@ package driver
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 type service struct {
@@ -32,13 +37,30 @@ type service struct {
 	csipb.UnimplementedNodeServer
 	config   Config
 	logger   *slog.Logger
+	kube     kubernetes.Interface
+	objects  objectStore
 	sessions map[string]*mountSession
 	locks    map[string]struct{}
 	mu       sync.Mutex
 }
 
-func newService(config Config, logger *slog.Logger) *service {
-	return &service{config: config, logger: logger, sessions: make(map[string]*mountSession), locks: make(map[string]struct{})}
+func newService(ctx context.Context, config Config, logger *slog.Logger) (*service, error) {
+	restConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load in-cluster Kubernetes configuration: %w", err)
+	}
+	kube, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes client: %w", err)
+	}
+	awsConfig, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(config.Region))
+	if err != nil {
+		return nil, fmt.Errorf("load AWS configuration: %w", err)
+	}
+	return &service{
+		config: config, logger: logger, kube: kube, objects: newS3ObjectStore(s3.NewFromConfig(awsConfig), config.Bucket),
+		sessions: make(map[string]*mountSession), locks: make(map[string]struct{}),
+	}, nil
 }
 
 func (s *service) GetPluginInfo(context.Context, *csipb.GetPluginInfoRequest) (*csipb.GetPluginInfoResponse, error) {
