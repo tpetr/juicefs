@@ -5,6 +5,10 @@ kind: Pod
 metadata:
   name: workflow-juicefs-architecture-proof
   namespace: ai-workflows
+  annotations:
+    workspaces.semgrep.dev/deployment-id: poc-deployment
+    workspaces.semgrep.dev/workflow-name: architecture-proof
+    workspaces.semgrep.dev/workflow-uid: architecture-proof-1
 spec:
   runtimeClassName: gvisor-netraw
   serviceAccountName: ai-workflows
@@ -13,7 +17,7 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
   - name: proof
-    image: 338683922796.dkr.ecr.us-west-2.amazonaws.com/semgrep/fuse-fd-csi-driver@sha256:dff06e298df387fa2b9e54642a07db7ac63c6d437c8c9d33c2797070186a3f19
+    image: 338683922796.dkr.ecr.us-west-2.amazonaws.com/semgrep/fuse-fd-csi-driver@sha256:f4efcfec770ca4f2756111212f891d3ff24a368fc51800cb5cbb6c1c6f847d1a
     imagePullPolicy: IfNotPresent
     command: [/bin/sh, -ceu]
     args:
@@ -27,6 +31,7 @@ spec:
       test "$(tail -n 1 /workspace/renamed)" = append
       rm /workspace/renamed
       test ! -e /workspace/renamed
+      workspace-csi-control mark-success /control/workspace.sock
       printf 'gvisor architecture proof passed at %s on %s\n' "$timestamp" "$HOSTNAME"
       sleep 600
     securityContext:
@@ -38,8 +43,16 @@ spec:
       readOnlyRootFilesystem: true
     volumeMounts:
     - {name: workspace, mountPath: /workspace}
+    - {name: control, mountPath: /control}
   volumes:
+  - name: control
+    emptyDir: {}
   - name: workspace
     csi:
       driver: workflow-juicefs.csi.semgrep.dev
       readOnly: false
+      volumeAttributes:
+        deploymentID: poc-deployment
+        workflowName: architecture-proof
+        workflowUID: architecture-proof-1
+        controlEmptyDirName: control

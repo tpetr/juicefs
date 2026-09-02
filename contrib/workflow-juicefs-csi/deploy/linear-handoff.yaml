@@ -1,0 +1,102 @@
+# Copyright 2026 Semgrep, Inc.
+# Licensed under the Apache License, Version 2.0.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workflow-juicefs-handoff-a
+  namespace: ai-workflows
+  labels: {workspaces.semgrep.dev/test: linear-handoff}
+  annotations:
+    workspaces.semgrep.dev/deployment-id: poc-deployment
+    workspaces.semgrep.dev/workflow-name: linear-handoff
+    workspaces.semgrep.dev/workflow-uid: linear-handoff-1
+spec:
+  runtimeClassName: gvisor-netraw
+  serviceAccountName: ai-workflows
+  restartPolicy: Never
+  containers:
+  - name: step
+    image: 338683922796.dkr.ecr.us-west-2.amazonaws.com/semgrep/fuse-fd-csi-driver@sha256:f4efcfec770ca4f2756111212f891d3ff24a368fc51800cb5cbb6c1c6f847d1a
+    command: [/bin/sh, -ceu]
+    args:
+    - |
+      printf 'written-by-a\n' > /workspace/handoff.txt
+      test "$(cat /workspace/handoff.txt)" = written-by-a
+      workspace-csi-control mark-success /control/workspace.sock
+      printf 'pod A marked the workspace successful\n'
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+      readOnlyRootFilesystem: true
+    volumeMounts:
+    - {name: workspace, mountPath: /workspace}
+    - {name: control, mountPath: /control}
+  volumes:
+  - name: control
+    emptyDir: {}
+  - name: workspace
+    csi:
+      driver: workflow-juicefs.csi.semgrep.dev
+      volumeAttributes:
+        deploymentID: poc-deployment
+        workflowName: linear-handoff
+        workflowUID: linear-handoff-1
+        controlEmptyDirName: control
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workflow-juicefs-handoff-b
+  namespace: ai-workflows
+  labels: {workspaces.semgrep.dev/test: linear-handoff}
+  annotations:
+    workspaces.semgrep.dev/deployment-id: poc-deployment
+    workspaces.semgrep.dev/workflow-name: linear-handoff
+    workspaces.semgrep.dev/workflow-uid: linear-handoff-1
+spec:
+  runtimeClassName: gvisor-netraw
+  serviceAccountName: ai-workflows
+  restartPolicy: Never
+  schedulingGates:
+  - name: workspaces.semgrep.dev/wait-for-a-commit
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels: {workspaces.semgrep.dev/test: linear-handoff}
+  containers:
+  - name: step
+    image: 338683922796.dkr.ecr.us-west-2.amazonaws.com/semgrep/fuse-fd-csi-driver@sha256:f4efcfec770ca4f2756111212f891d3ff24a368fc51800cb5cbb6c1c6f847d1a
+    command: [/bin/sh, -ceu]
+    args:
+    - |
+      test "$(cat /workspace/handoff.txt)" = written-by-a
+      workspace-csi-control mark-success /control/workspace.sock
+      printf 'pod B restored and verified pod A metadata\n'
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+      readOnlyRootFilesystem: true
+    volumeMounts:
+    - {name: workspace, mountPath: /workspace}
+    - {name: control, mountPath: /control}
+  volumes:
+  - name: control
+    emptyDir: {}
+  - name: workspace
+    csi:
+      driver: workflow-juicefs.csi.semgrep.dev
+      volumeAttributes:
+        deploymentID: poc-deployment
+        workflowName: linear-handoff
+        workflowUID: linear-handoff-1
+        controlEmptyDirName: control

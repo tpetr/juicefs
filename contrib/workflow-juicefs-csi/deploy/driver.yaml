@@ -10,6 +10,33 @@ spec:
   volumeLifecycleModes:
   - Ephemeral
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-juicefs-csi
+  namespace: ai-workflows
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get]
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-juicefs-csi
+  namespace: ai-workflows
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-juicefs-csi
+subjects:
+- kind: ServiceAccount
+  name: ai-workflows
+  namespace: ai-workflows
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -42,22 +69,26 @@ spec:
       - {key: semgrep.dev/gvisor-netraw-arm-node, operator: Exists, effect: NoSchedule}
       containers:
       - name: driver
-        image: 338683922796.dkr.ecr.us-west-2.amazonaws.com/semgrep/fuse-fd-csi-driver@sha256:dff06e298df387fa2b9e54642a07db7ac63c6d437c8c9d33c2797070186a3f19
+        image: 338683922796.dkr.ecr.us-west-2.amazonaws.com/semgrep/fuse-fd-csi-driver@sha256:f4efcfec770ca4f2756111212f891d3ff24a368fc51800cb5cbb6c1c6f847d1a
         imagePullPolicy: IfNotPresent
         args:
         - --endpoint=unix:///csi/csi.sock
         - --node-id=$(KUBE_NODE_NAME)
+        - --kubelet-access-root=/k
         - --bucket=dev2-ai-workflows-artifact-repository
         - --region=us-west-2
-        - --object-prefix=juicefs-csi-poc
+        - --object-prefix=juicefs/v1
+        - --tenant=dev2
         - --allowed-namespace=ai-workflows
         - --allowed-service-account=ai-workflows
+        - --lease-namespace=ai-workflows
         env:
         - name: KUBE_NODE_NAME
           valueFrom:
             fieldRef: {fieldPath: spec.nodeName}
         - {name: AWS_REGION, value: us-west-2}
         - {name: HOME, value: /tmp}
+        - {name: JFS_NO_CHECK_OBJECT_STORAGE, value: "1"}
         securityContext:
           privileged: true
           readOnlyRootFilesystem: true
@@ -66,6 +97,7 @@ spec:
           limits: {cpu: "2", memory: 2Gi}
         volumeMounts:
         - {name: kubelet-dir, mountPath: /var/lib/kubelet/pods, mountPropagation: Bidirectional}
+        - {name: kubelet-dir, mountPath: /k/pods, mountPropagation: HostToContainer}
         - {name: state-dir, mountPath: /var/lib/workflow-juicefs-csi, mountPropagation: Bidirectional}
         - {name: socket-dir, mountPath: /csi}
         - {name: fuse-device, mountPath: /dev/fuse}
