@@ -1,0 +1,114 @@
+# Copyright 2026 Semgrep, Inc.
+# Licensed under the Apache License, Version 2.0.
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: workflow-juicefs.csi.semgrep.dev
+spec:
+  attachRequired: false
+  podInfoOnMount: true
+  volumeLifecycleModes:
+  - Ephemeral
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: workflow-juicefs-csi
+  namespace: ai-workflows
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-juicefs-csi
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: workflow-juicefs-csi
+        tags.datadoghq.com/team: workflow-xp
+    spec:
+      serviceAccountName: ai-workflows
+      terminationGracePeriodSeconds: 120
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: karpenter.sh/nodepool
+                operator: In
+                values:
+                - gvisor-netraw
+                - gvisor-netraw-arm
+      tolerations:
+      - {key: semgrep.dev/gvisor-netraw-node, operator: Exists, effect: NoSchedule}
+      - {key: semgrep.dev/gvisor-netraw-arm-node, operator: Exists, effect: NoSchedule}
+      containers:
+      - name: driver
+        image: 338683922796.dkr.ecr.us-west-2.amazonaws.com/semgrep/fuse-fd-csi-driver@sha256:dff06e298df387fa2b9e54642a07db7ac63c6d437c8c9d33c2797070186a3f19
+        imagePullPolicy: IfNotPresent
+        args:
+        - --endpoint=unix:///csi/csi.sock
+        - --node-id=$(KUBE_NODE_NAME)
+        - --bucket=dev2-ai-workflows-artifact-repository
+        - --region=us-west-2
+        - --object-prefix=juicefs-csi-poc
+        - --allowed-namespace=ai-workflows
+        - --allowed-service-account=ai-workflows
+        env:
+        - name: KUBE_NODE_NAME
+          valueFrom:
+            fieldRef: {fieldPath: spec.nodeName}
+        - {name: AWS_REGION, value: us-west-2}
+        - {name: HOME, value: /tmp}
+        securityContext:
+          privileged: true
+          readOnlyRootFilesystem: true
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: "2", memory: 2Gi}
+        volumeMounts:
+        - {name: kubelet-dir, mountPath: /var/lib/kubelet/pods, mountPropagation: Bidirectional}
+        - {name: state-dir, mountPath: /var/lib/workflow-juicefs-csi, mountPropagation: Bidirectional}
+        - {name: socket-dir, mountPath: /csi}
+        - {name: fuse-device, mountPath: /dev/fuse}
+        - {name: tmp, mountPath: /tmp}
+      - name: liveness-probe
+        image: registry.k8s.io/sig-storage/livenessprobe@sha256:9b75b9ade162136291d5e8f13a1dfc3dec71ee61419b1bfc112e0796ff8a6aa9
+        args: [--csi-address=/csi/csi.sock, --health-port=9808, --probe-timeout=3s]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+          readOnlyRootFilesystem: true
+        livenessProbe:
+          httpGet: {path: /healthz, port: 9808}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet: {path: /healthz, port: 9808}
+          periodSeconds: 5
+        volumeMounts:
+        - {name: socket-dir, mountPath: /csi}
+      - name: registrar
+        image: registry.k8s.io/sig-storage/csi-node-driver-registrar@sha256:f9de845b170155199f2a2a3f9531cf13d78e31235e9db6b6582a8b0db0a50dad
+        args:
+        - --v=5
+        - --csi-address=/csi/csi.sock
+        - --kubelet-registration-path=/var/lib/kubelet/plugins/workflow-juicefs.csi.semgrep.dev/csi.sock
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - {name: socket-dir, mountPath: /csi}
+        - {name: registration-dir, mountPath: /registration}
+      volumes:
+      - name: registration-dir
+        hostPath: {path: /var/lib/kubelet/plugins_registry, type: Directory}
+      - name: kubelet-dir
+        hostPath: {path: /var/lib/kubelet/pods, type: Directory}
+      - name: state-dir
+        hostPath: {path: /var/lib/workflow-juicefs-csi, type: DirectoryOrCreate}
+      - name: socket-dir
+        hostPath: {path: /var/lib/kubelet/plugins/workflow-juicefs.csi.semgrep.dev, type: DirectoryOrCreate}
+      - name: fuse-device
+        hostPath: {path: /dev/fuse, type: CharDevice}
+      - name: tmp
+        emptyDir: {}
