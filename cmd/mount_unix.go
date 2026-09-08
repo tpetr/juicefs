@@ -48,6 +48,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/juicedata/juicefs/pkg/fuse"
+	"github.com/juicedata/juicefs/pkg/fusefd"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/juicedata/juicefs/pkg/utils"
@@ -943,6 +944,19 @@ func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorag
 		for {
 			sig := <-signalChan
 			logger.Infof("Received signal %s, exiting...", sig.String())
+			if os.Getenv(fusefd.Env) != "" {
+				code := 0
+				if err := v.FlushAll(""); err != nil {
+					logger.Errorf("flush all: %s", err)
+					code = 1
+				}
+				if err := m.CloseSession(); err != nil {
+					logger.Errorf("close session: %s", err)
+					code = 1
+				}
+				object.Shutdown(blob)
+				os.Exit(code) // Closing the FUSE FD lets the external driver tear down the mount.
+			}
 			if sig == syscall.SIGHUP {
 				path := fmt.Sprintf("/tmp/state%d.json", os.Getppid())
 				if err := v.FlushAll(""); err == nil {

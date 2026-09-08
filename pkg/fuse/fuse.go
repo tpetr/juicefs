@@ -29,6 +29,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/juicedata/juicefs/pkg/fusefd"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/vfs"
@@ -459,11 +460,16 @@ func Serve(v *vfs.VFS, options string, xattrs, ioctl bool) error {
 	if err := syscall.Setpriority(syscall.PRIO_PROCESS, os.Getpid(), -19); err != nil {
 		logger.Warnf("setpriority: %s", err)
 	}
-	err := grantAccess()
+	socket, err := fusefd.Socket()
 	if err != nil {
-		logger.Debugf("grant access to /dev/fuse: %s", err)
+		return err
 	}
-	ensureFuseDev()
+	if socket == "" {
+		if err := grantAccess(); err != nil {
+			logger.Debugf("grant access to /dev/fuse: %s", err)
+		}
+		ensureFuseDev()
+	}
 
 	conf := v.Conf
 	imp := newFileSystem(conf, v)
@@ -518,7 +524,12 @@ func Serve(v *vfs.VFS, options string, xattrs, ioctl bool) error {
 		opt.Options = append(opt.Options, "volname="+conf.Format.Name)
 		opt.Options = append(opt.Options, "daemon_timeout=60", "iosize=65536", "novncache")
 	}
-	fssrv, err := fuse.NewServer(imp, conf.Meta.MountPoint, &opt)
+	var fssrv *fuse.Server
+	if socket != "" {
+		fssrv, err = fusefd.NewServer(imp, &opt)
+	} else {
+		fssrv, err = fuse.NewServer(imp, conf.Meta.MountPoint, &opt)
+	}
 	if err != nil {
 		if execErr, ok := err.(*exec.Error); ok {
 			if pathErr, ok := execErr.Unwrap().(*os.PathError); ok &&
