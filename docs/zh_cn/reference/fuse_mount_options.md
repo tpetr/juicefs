@@ -58,3 +58,21 @@ FUSE 支持[「writeback-cache 模式」](https://www.kernel.org/doc/Documentati
 :::note 注意
 该选项会将低层类库（`go-fuse`）的 Debug 信息输出到 `juicefs.log` 中，需要注意的是，该选项与 JuiceFS 客户端的全局 `--debug` 选项不同，前者是输出 `go-fuse` 类库的调试信息，后者是输出 JuiceFS 客户端的调试信息。详情参考文档[故障诊断和分析](../administration/fault_diagnosis_and_analysis.md)。
 :::
+
+## 外部挂载器 / CSI 引导模式（Linux）
+
+`JFS_PREOPENED_FUSE_FD_COMM=/absolute/path/to/socket` 用于特权外部挂载器（例如 CSI 驱动）集成，不用于普通 CLI 挂载。驱动必须先在宿主机挂载一个全新的 `/dev/fuse` 连接，并向工作负载提供 Unix 流套接字：
+
+```bash
+JFS_PREOPENED_FUSE_FD_COMM=/run/csi/fuse.sock juicefs mount META-URL /mnt/jfs
+```
+
+JuiceFS 连接后，驱动通过一次 `sendmsg` 使用 `SCM_RIGHTS` 发送恰好一个 FD，同时发送至少一个载荷字节。载荷内容不作为 FUSE 初始化状态解析。多余或缺失的 FD、控制数据截断、连接失败以及发送前对端关闭都会导致启动失败。JuiceFS 在连接后最多等待 30 秒接收 FD，超时会返回明确的错误。套接字访问权限应限制为目标工作负载。
+
+FD 必须对应尚未读取内核 `FUSE_INIT` 请求的新挂载连接。JuiceFS 接管 FD 后读取内核请求，发送 go-fuse 正常的 `InitOut` 回复，再调用文件系统初始化。工作负载无需自行打开 `/dev/fuse` 或调用挂载辅助程序。JuiceFS 在初始化失败或服务结束时关闭收到的 FD；驱动应在发送后关闭自己的副本。
+
+此模式直接以前台服务运行，跳过重启监督进程、挂载点准备及 INIT 前的就绪检查，不允许 `--background` 和 `--update-fstab`。挂载点参数标识外部挂载，驱动负责挂载、就绪检查、卸载和重启策略。驱动设置的内核挂载选项（如 `allow_other`、`default_permissions` 和 `max_read`）必须与 JuiceFS 配置一致。进程重启需要新的挂载连接，不能恢复已初始化的会话。SIGTERM、SIGINT 和 SIGHUP 会刷写数据并退出，不执行本地卸载或平滑重启。
+
+不能与 `JFS_SUPER_COMM`、`_FUSE_FD_COMM`、`JFS_SUPERVISOR` 或 `_FUSE_STATE_PATH` 同时使用。这些设置属于独立的平滑升级/状态传递流程，该流程交换两个 FD 及序列化的 `InitIn` 状态。
+
+无需修改 go-fuse 依赖：当前固定版本的 `github.com/juicedata/go-fuse/v2` 已支持 `/dev/fd/N` 挂载点及后续正常的 `handleInit` 流程。此模式先关闭 `DirectMount` 和 `DirectMountStrict`，避免接管 FD 前执行挂载调用。未设置该环境变量时，普通挂载和平滑升级行为保持不变。

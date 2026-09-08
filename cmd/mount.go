@@ -40,6 +40,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/juicedata/juicefs/pkg/chunk"
+	"github.com/juicedata/juicefs/pkg/fusefd"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/metric"
 	"github.com/juicedata/juicefs/pkg/usage"
@@ -545,6 +546,13 @@ func getDefaultLogDir() string {
 }
 
 func mount(c *cli.Context) error {
+	bootstrapSocket, err := fusefd.Socket()
+	if err != nil {
+		return err
+	}
+	if bootstrapSocket != "" && (c.Bool("background") || c.Bool("update-fstab")) {
+		return fmt.Errorf("%s requires foreground mode without --update-fstab", fusefd.Env)
+	}
 	setup(c, 2)
 	addr := c.Args().Get(0)
 	removePassword(addr)
@@ -555,11 +563,10 @@ func mount(c *cli.Context) error {
 		logger.Fatalf("Invalid daemon stage: %d", stage)
 	}
 	supervisor := os.Getenv("JFS_SUPERVISOR")
-	if supervisor != "" || runtime.GOOS == "windows" {
+	if supervisor != "" || runtime.GOOS == "windows" || bootstrapSocket != "" {
 		stage = 3
 	}
 
-	var err error
 	if stage == 0 || supervisor == "test" {
 		err = utils.WithTimeout(context.TODO(), func(context.Context) error {
 			mp, err = filepath.Abs(mp)

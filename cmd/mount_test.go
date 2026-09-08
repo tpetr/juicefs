@@ -359,3 +359,26 @@ func TestParseUIDGID(t *testing.T) {
 		}
 	}
 }
+
+func TestPreopenedFuseConfiguration(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux FUSE bootstrap")
+	}
+	for _, name := range []string{"JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("JFS_PREOPENED_FUSE_FD_COMM", "/unused-bootstrap.sock")
+	for _, flag := range []string{"--background", "--update-fstab"} {
+		t.Run(flag, func(t *testing.T) {
+			err := Main([]string{"juicefs", "mount", flag, "redis://unused", "/unused-mount"})
+			if err == nil || !strings.Contains(err.Error(), "requires foreground mode") {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+	t.Setenv("JFS_SUPER_COMM", "/legacy.sock")
+	err := Main([]string{"juicefs", "mount", "redis://unused", "/unused-mount"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with JFS_SUPER_COMM") {
+		t.Fatalf("got %v", err)
+	}
+}

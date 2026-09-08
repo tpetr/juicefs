@@ -58,3 +58,21 @@ This option will output Debug information from the low-level library (`go-fuse`)
 :::note
 This option will output debug information for the low-level library (`go-fuse`) to `juicefs.log`. Note that this option is different from the global `-debug` option for the JuiceFS client, where the former outputs debug information for the `go-fuse` library and the latter outputs debug information for the JuiceFS client. see the documentation [Fault Diagnosis and Analysis](../administration/fault_diagnosis_and_analysis.md).
 :::
+
+## External mounter / CSI bootstrap (Linux)
+
+`JFS_PREOPENED_FUSE_FD_COMM=/absolute/path/to/socket` enables an integration mode for a privileged external mounter, such as a CSI driver. It is not intended for ordinary CLI mounts. The driver must mount a fresh `/dev/fuse` connection on the host and expose a Unix stream socket to the workload before starting JuiceFS:
+
+```bash
+JFS_PREOPENED_FUSE_FD_COMM=/run/csi/fuse.sock juicefs mount META-URL /mnt/jfs
+```
+
+After JuiceFS connects, the driver sends **exactly one FD** using `SCM_RIGHTS`, with at least one payload byte in the same `sendmsg`. Payload bytes have no meaning and are never decoded as FUSE initialization state. Extra descriptors, truncated control data, missing descriptors, connection errors, and a peer closing before transfer cause startup to fail. JuiceFS allows 30 seconds after connecting to receive the FD; a silent peer causes a descriptive timeout error. Restrict access to the socket to the intended workload.
+
+The FD must belong to a newly mounted connection whose kernel `FUSE_INIT` request has not been consumed. JuiceFS adopts the FD, reads that request, sends go-fuse's normal `InitOut` reply, and then invokes filesystem initialization. The workload does not need to open `/dev/fuse` or invoke a mount helper. JuiceFS owns the received descriptor and closes it on initialization failure or when serving ends; the driver should close its own copy after transfer.
+
+JuiceFS runs in the foreground without its restart supervisor, mountpoint preparation, or pre-INIT readiness probes. `--background` and `--update-fstab` are rejected. The mountpoint argument identifies the external mount; the driver owns mounting, readiness checks, unmounting, and restart policy. Kernel mount options (including `allow_other`, `default_permissions`, and `max_read`) must be configured by the driver consistently with the JuiceFS options. A process restart requires a fresh mounted connection; this mode cannot resume an initialized session. SIGTERM, SIGINT, and SIGHUP flush data and exit without a local unmount or smooth restart.
+
+Do not combine this setting with `JFS_SUPER_COMM`, `_FUSE_FD_COMM`, `JFS_SUPERVISOR`, or `_FUSE_STATE_PATH`. Those settings belong to JuiceFS's separate smooth-upgrade/state-transfer lifecycle, which exchanges two FDs and serialized `InitIn` state.
+
+No go-fuse dependency update or vendor patch is required: the pinned `github.com/juicedata/go-fuse/v2` replacement already supports `/dev/fd/N` mountpoints followed by its ordinary `handleInit` flow. Bootstrap disables `DirectMount` and `DirectMountStrict` before using that entry point, so no mount syscall precedes FD adoption. Normal mounts and smooth upgrades retain their existing paths when the setting is absent.
