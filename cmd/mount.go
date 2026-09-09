@@ -19,6 +19,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -692,15 +693,39 @@ func mount(c *cli.Context) error {
 		store.UpdateLimit(fmt.UploadLimit, fmt.DownloadLimit)
 	})
 	v := vfs.NewVFS(vfsConf, metaCli, store, registerer, registry)
-	installHandler(metaCli, mp, v, blob)
+	resources := &mountResources{
+		closeSession:    metaCli.CloseSession,
+		shutdownStorage: func() { object.Shutdown(blob) },
+	}
+	handler, err := installHandler(metaCli, mp, v, blob)
+	if err != nil {
+		return errors.Join(err, resources.close())
+	}
+	if handler != nil {
+		defer func() {
+			if err := handler.close(); err != nil {
+				logger.Warnf("close clean-unmount control endpoint: %s", err)
+			}
+		}()
+	}
 	v.UpdateFormat = updateFormat(c)
 	initBackgroundTasks(c, vfsConf, metaConf, metaCli, blob, registerer, registry)
 	mountMain(v, c)
-	if err := v.FlushAll(""); err != nil {
-		logger.Errorf("flush all delayed data: %s", err)
+	var result error
+	if handler != nil {
+		_, result = handler.mountResult()
 	}
-	err = metaCli.CloseSession()
-	object.Shutdown(blob)
-	logger.Infof("The juicefs mount process exit successfully, mountpoint: %q", metaConf.MountPoint)
-	return err
+	if flushErr := v.FlushAll(""); flushErr != nil {
+		logger.Errorf("flush all delayed data: %s", flushErr)
+		if handler != nil {
+			result = errors.Join(result, flushErr)
+		}
+	}
+	result = errors.Join(result, resources.close())
+	if handler != nil && result != nil {
+		logger.Errorf("The juicefs mount process exit with error, mountpoint: %q: %s", metaConf.MountPoint, result)
+	} else {
+		logger.Infof("The juicefs mount process exit successfully, mountpoint: %q", metaConf.MountPoint)
+	}
+	return result
 }

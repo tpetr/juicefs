@@ -23,7 +23,10 @@ import (
 	"runtime"
 )
 
-const Env = "JFS_PREOPENED_FUSE_FD_COMM"
+const (
+	Env        = "JFS_PREOPENED_FUSE_FD_COMM"
+	ControlEnv = "JFS_PREOPENED_FUSE_FD_CONTROL"
+)
 
 // Socket returns the opt-in bootstrap socket and rejects state-transfer settings.
 func Socket() (string, error) {
@@ -40,4 +43,26 @@ func Socket() (string, error) {
 		}
 	}
 	return path, nil
+}
+
+// ControlSocket returns the private clean-unmount socket for pre-opened mode.
+func ControlSocket() (string, error) {
+	bootstrap, err := Socket()
+	if err != nil {
+		return "", err
+	}
+	configured := os.Getenv(ControlEnv)
+	if bootstrap == "" {
+		if configured != "" {
+			return "", fmt.Errorf("%s requires %s", ControlEnv, Env)
+		}
+		return "", nil
+	}
+	if configured == "" {
+		configured = bootstrap + ".control"
+	}
+	if configured == bootstrap {
+		return "", fmt.Errorf("%s must differ from %s", ControlEnv, Env)
+	}
+	return configured, nil
 }

@@ -17,6 +17,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/juicedata/juicefs/pkg/fusefd"
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
@@ -58,26 +60,30 @@ $ juicefs umount /mnt/jfs`,
 }
 
 func doUmount(mp string, force bool) error {
+	return doUmountContext(context.Background(), mp, force)
+}
+
+func doUmountContext(ctx context.Context, mp string, force bool) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
 		if force {
-			cmd = exec.Command("umount", "-f", mp)
+			cmd = exec.CommandContext(ctx, "umount", "-f", mp)
 		} else {
-			cmd = exec.Command("umount", mp)
+			cmd = exec.CommandContext(ctx, "umount", mp)
 		}
 	case "linux":
 		if _, err := exec.LookPath("fusermount"); err == nil {
 			if force {
-				cmd = exec.Command("fusermount", "-uz", mp)
+				cmd = exec.CommandContext(ctx, "fusermount", "-uz", mp)
 			} else {
-				cmd = exec.Command("fusermount", "-u", mp)
+				cmd = exec.CommandContext(ctx, "fusermount", "-u", mp)
 			}
 		} else {
 			if force {
-				cmd = exec.Command("umount", "-l", mp)
+				cmd = exec.CommandContext(ctx, "umount", "-l", mp)
 			} else {
-				cmd = exec.Command("umount", mp)
+				cmd = exec.CommandContext(ctx, "umount", mp)
 			}
 		}
 	case "windows":
@@ -91,6 +97,9 @@ func doUmount(mp string, force bool) error {
 		return fmt.Errorf("OS %s is not supported", runtime.GOOS)
 	}
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("unmount %q: %w", mp, ctx.Err())
+	}
 	if err != nil && len(out) != 0 {
 		err = errors.New(string(out))
 	}
@@ -100,8 +109,29 @@ func doUmount(mp string, force bool) error {
 func umount(ctx *cli.Context) error {
 	setup(ctx, 1)
 	mp := ctx.Args().Get(0)
-	if ctx.Bool("flush") {
-		raw, err := readConfig(mp)
+	controlPath, err := fusefd.ControlSocket()
+	if err != nil {
+		return err
+	}
+	return unmountMountpoint(mp, ctx.Bool("flush"), ctx.Bool("force"), controlPath, umountOperations{
+		requestExternal: fusefd.RequestUnmount,
+		readConfig:      readConfig,
+		localUnmount:    doUmount,
+	})
+}
+
+type umountOperations struct {
+	requestExternal func(string, bool, time.Duration) error
+	readConfig      func(string) ([]byte, error)
+	localUnmount    func(string, bool) error
+}
+
+func unmountMountpoint(mp string, flush, force bool, controlPath string, ops umountOperations) error {
+	if controlPath != "" {
+		return ops.requestExternal(controlPath, force, fusefd.ControlTimeout)
+	}
+	if flush {
+		raw, err := ops.readConfig(mp)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return fmt.Errorf("not a JuiceFS mount point")
@@ -129,12 +159,23 @@ func umount(ctx *cli.Context) error {
 			}()
 		}
 	}
-	return doUmount(mp, ctx.Bool("force"))
+	return ops.localUnmount(mp, force)
 }
 
 func waitWritebackComplete(stagingDir string) error {
+	return waitWritebackCompleteFor(stagingDir, 0)
+}
+
+func waitWritebackCompleteFor(stagingDir string, timeout time.Duration) error {
 	lastLeft := uint64(0)
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
 	for {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return fmt.Errorf("timeout after %s waiting for staging chunks in %q", timeout, stagingDir)
+		}
 		_, err := os.Stat(stagingDir)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -170,7 +211,13 @@ func waitWritebackComplete(stagingDir string) error {
 		clearLastLine()
 		fmt.Printf("\r%s staging chunks are being flushed... %s/s, left %s", humanize.IBytes(size), humanize.IBytes(speed), leftTime)
 		lastLeft = size
-		time.Sleep(time.Second - time.Since(start))
+		sleep := time.Second - time.Since(start)
+		if !deadline.IsZero() && time.Now().Add(sleep).After(deadline) {
+			sleep = time.Until(deadline)
+		}
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
 	}
 }
 
