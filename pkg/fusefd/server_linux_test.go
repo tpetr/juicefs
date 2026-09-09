@@ -297,16 +297,26 @@ func TestSocket(t *testing.T) {
 	if path, err := Socket(); path != "/bootstrap.sock" || err != nil {
 		t.Fatalf("bootstrap: %q %v", path, err)
 	}
-	if path, err := ControlSocket(); path != "/bootstrap.sock.control" || err != nil {
+	if path, err := ControlSocket(); path != "/bootstrap.sock.juicefs-control" || err != nil {
 		t.Fatalf("derived control socket: %q %v", path, err)
 	}
 	t.Setenv(ControlEnv, "/control.sock")
 	if path, err := ControlSocket(); path != "/control.sock" || err != nil {
 		t.Fatalf("configured control socket: %q %v", path, err)
 	}
-	t.Setenv(ControlEnv, "/bootstrap.sock")
-	if _, err := ControlSocket(); err == nil || !strings.Contains(err.Error(), "must differ") {
-		t.Fatalf("shared bootstrap and control socket: %v", err)
+	for _, tc := range []struct {
+		path      string
+		collision string
+	}{
+		{"/bootstrap.sock", "FD handoff socket"},
+		{"/bootstrap.sock.control", "CSI driver control socket"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Setenv(ControlEnv, tc.path)
+			if _, err := ControlSocket(); err == nil || !strings.Contains(err.Error(), tc.collision) || !strings.Contains(err.Error(), "distinct writable socket path") {
+				t.Fatalf("reserved control socket %q: %v", tc.path, err)
+			}
+		})
 	}
 }
 

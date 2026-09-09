@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,41 @@ func TestControlEndpointPermissionsAndCleanup(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("control endpoint was not removed: %v", err)
+	}
+}
+
+func TestDerivedControlEndpointPermissionsAndCleanup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pre-opened FUSE mode is Linux-only")
+	}
+	for _, name := range []string{Env, ControlEnv, "JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH"} {
+		t.Setenv(name, "")
+	}
+	handoff := shortSocketPath(t, "handoff.sock")
+	t.Setenv(Env, handoff)
+	path, err := ControlSocket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := handoff + ".juicefs-control"; path != want {
+		t.Fatalf("derived control socket = %q, want %q", path, want)
+	}
+	server, err := ServeControl(path, func(bool) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("derived control endpoint mode is %v, want socket 0600", info.Mode())
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("derived control endpoint was not removed: %v", err)
 	}
 }
 

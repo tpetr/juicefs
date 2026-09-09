@@ -59,10 +59,13 @@ func ControlSocket() (string, error) {
 		return "", nil
 	}
 	if configured == "" {
-		configured = bootstrap + ".control"
+		configured = bootstrap + ".juicefs-control"
 	}
 	if configured == bootstrap {
-		return "", fmt.Errorf("%s must differ from %s", ControlEnv, Env)
+		return "", fmt.Errorf("%s %q collides with the pre-opened FUSE FD handoff socket; set %s to a distinct writable socket path", ControlEnv, configured, ControlEnv)
+	}
+	if configured == bootstrap+".control" {
+		return "", fmt.Errorf("%s %q collides with the CSI driver control socket; set %s to a distinct writable socket path", ControlEnv, configured, ControlEnv)
 	}
 	return configured, nil
 }

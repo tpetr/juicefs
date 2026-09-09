@@ -171,6 +171,46 @@ func TestPreopenedUmountCommandSkipsMountConfig(t *testing.T) {
 	}
 }
 
+func TestPreopenedMountAndUmountUseSameDefaultControlPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pre-opened FUSE mode is Linux-only")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH", fusefd.ControlEnv} {
+		t.Setenv(name, "")
+	}
+	handoff := filepath.Join(dir, "handoff.sock")
+	t.Setenv(fusefd.Env, handoff)
+	controlPath, err := fusefd.ControlSocket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := handoff + ".juicefs-control"; controlPath != want {
+		t.Fatalf("control path = %q, want %q", controlPath, want)
+	}
+	requested := make(chan struct{}, 1)
+	external, err := newExternalUnmount(controlPath, func() error { return nil }, func(bool) error {
+		requested <- struct{}{}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer external.close()
+	dummy := filepath.Join(dir, "dummy")
+	if err := os.Mkdir(dummy, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Main([]string{"juicefs", "umount", "--flush", dummy}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-requested:
+	case <-time.After(time.Second):
+		t.Fatal("default control socket did not receive the request")
+	}
+}
+
 func TestNormalUmountStillReadsConfigAndUnmountsLocally(t *testing.T) {
 	raw, err := json.Marshal(vfs.Config{Chunk: &chunk.Config{}})
 	if err != nil {

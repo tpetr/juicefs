@@ -71,7 +71,7 @@ JuiceFS 连接后，驱动通过一次 `sendmsg` 使用 `SCM_RIGHTS` 发送恰�
 
 FD 必须对应尚未读取内核 `FUSE_INIT` 请求的新挂载连接。JuiceFS 接管 FD 后读取内核请求，发送 go-fuse 正常的 `InitOut` 回复，再调用文件系统初始化。工作负载无需自行打开 `/dev/fuse` 或调用挂载辅助程序。JuiceFS 在初始化失败或服务结束时关闭收到的 FD；驱动应在发送后关闭自己的副本。
 
-在此模式下，前台挂载进程还会在 `<JFS_PREOPENED_FUSE_FD_COMM>.control` 创建权限为 `0600` 的私有清理卸载套接字。可通过 `JFS_PREOPENED_FUSE_FD_CONTROL` 指定其他路径；挂载进程和 `umount` 进程必须能看到同一路径。`juicefs umount --flush MOUNTPOINT` 会向该套接字发送请求，而不读取 `MOUNTPOINT/.config`。挂载进程会刷新待处理数据，调用 `fusermount -u MOUNTPOINT`（该程序可以是 CSI 驱动提供的认证代理），等待 FUSE 服务循环停止，然后关闭元数据会话和对象存储并退出。`SIGTERM` 使用相同的清理流程。正常退出时会删除控制套接字。
+此模式使用三个不同的端点。`JFS_PREOPENED_FUSE_FD_COMM` 是 FD 交接套接字；其同级路径 `<handoff>.control` 保留给 CSI 驱动的、经过认证的节点侧卸载代理。前台 JuiceFS 挂载进程默认在 `<handoff>.juicefs-control` 创建权限为 `0600` 的私有清理卸载套接字。仍可通过 `JFS_PREOPENED_FUSE_FD_CONTROL` 显式指定自定义 JuiceFS 控制路径；该路径必须是不同且可写的套接字路径，不能等于 FD 交接套接字或驱动的 `<handoff>.control` 套接字。挂载进程和 `umount` 进程会推导出同一个默认路径。`juicefs umount --flush MOUNTPOINT` 会向 JuiceFS 控制套接字发送请求，而不读取 `MOUNTPOINT/.config`。挂载进程会刷新待处理数据，调用 `fusermount -u MOUNTPOINT`（该程序可以是 CSI 驱动提供的认证代理），等待 FUSE 服务循环停止，然后关闭元数据会话和对象存储并退出。`SIGTERM` 使用相同的清理流程。正常退出时会删除 JuiceFS 控制套接字。
 
 此模式直接以前台服务运行，跳过重启监督进程、挂载点准备及 INIT 前的就绪检查，不允许 `--background` 和 `--update-fstab`。挂载点参数标识外部挂载，驱动负责挂载、就绪检查、卸载和重启策略。驱动设置的内核挂载选项（如 `allow_other`、`default_permissions` 和 `max_read`）必须与 JuiceFS 配置一致。进程重启需要新的挂载连接，不能恢复已初始化的会话。SIGTERM、SIGINT 和 SIGHUP 会刷写数据并退出，不执行本地卸载或平滑重启。
 
