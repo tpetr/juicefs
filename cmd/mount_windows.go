@@ -186,7 +186,9 @@ func setFuseOption(c *cli.Context, format *meta.Format, vfsConf *vfs.Config) {}
 
 func launchMount(c *cli.Context, mp string, conf *vfs.Config) error { return nil }
 
-func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorage) {}
+func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorage) (*externalUnmount, error) {
+	return nil, nil
+}
 
 func tryToInstallMountExec() error { return nil }
 

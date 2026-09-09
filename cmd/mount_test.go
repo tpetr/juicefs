@@ -364,7 +364,7 @@ func TestPreopenedFuseConfiguration(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux FUSE bootstrap")
 	}
-	for _, name := range []string{"JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH"} {
+	for _, name := range []string{"JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH", "JFS_PREOPENED_FUSE_FD_CONTROL"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("JFS_PREOPENED_FUSE_FD_COMM", "/unused-bootstrap.sock")

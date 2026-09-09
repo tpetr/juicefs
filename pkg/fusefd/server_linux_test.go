@@ -146,7 +146,7 @@ type initFS struct {
 func (fs *initFS) Init(server *fuse.Server) { fs.initialized <- server.KernelSettings() }
 
 func cleanEnvironment(t *testing.T) {
-	for _, name := range []string{Env, "JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH"} {
+	for _, name := range []string{Env, ControlEnv, "JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH"} {
 		t.Setenv(name, "")
 	}
 }
@@ -296,6 +296,17 @@ func TestSocket(t *testing.T) {
 	}
 	if path, err := Socket(); path != "/bootstrap.sock" || err != nil {
 		t.Fatalf("bootstrap: %q %v", path, err)
+	}
+	if path, err := ControlSocket(); path != "/bootstrap.sock.control" || err != nil {
+		t.Fatalf("derived control socket: %q %v", path, err)
+	}
+	t.Setenv(ControlEnv, "/control.sock")
+	if path, err := ControlSocket(); path != "/control.sock" || err != nil {
+		t.Fatalf("configured control socket: %q %v", path, err)
+	}
+	t.Setenv(ControlEnv, "/bootstrap.sock")
+	if _, err := ControlSocket(); err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("shared bootstrap and control socket: %v", err)
 	}
 }
 

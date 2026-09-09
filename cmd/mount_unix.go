@@ -935,7 +935,31 @@ func increaseRlimit() {
 	}
 }
 
-func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorage) {
+func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorage) (*externalUnmount, error) {
+	controlPath, err := fusefd.ControlSocket()
+	if err != nil {
+		return nil, err
+	}
+	var external *externalUnmount
+	if controlPath != "" {
+		external, err = newExternalUnmount(controlPath, func() error {
+			if err := v.FlushAll(""); err != nil {
+				return err
+			}
+			if v.Conf.Chunk != nil && v.Conf.Chunk.Writeback {
+				stagingDir := path.Join(v.Conf.Chunk.CacheDir, "rawstaging")
+				return waitWritebackCompleteFor(stagingDir, 2*time.Minute)
+			}
+			return nil
+		}, func(force bool) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			return doUmountContext(ctx, mp, force)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Go will catch all the signals
 	signal.Ignore(syscall.SIGPIPE)
 	signalChan := make(chan os.Signal, 10)
@@ -944,18 +968,11 @@ func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorag
 		for {
 			sig := <-signalChan
 			logger.Infof("Received signal %s, exiting...", sig.String())
-			if os.Getenv(fusefd.Env) != "" {
-				code := 0
-				if err := v.FlushAll(""); err != nil {
-					logger.Errorf("flush all: %s", err)
-					code = 1
+			if external != nil {
+				if err := external.request(false); err != nil {
+					logger.Errorf("clean unmount after %s: %s", sig, err)
 				}
-				if err := m.CloseSession(); err != nil {
-					logger.Errorf("close session: %s", err)
-					code = 1
-				}
-				object.Shutdown(blob)
-				os.Exit(code) // Closing the FUSE FD lets the external driver tear down the mount.
+				continue
 			}
 			if sig == syscall.SIGHUP {
 				path := fmt.Sprintf("/tmp/state%d.json", os.Getppid())
@@ -988,6 +1005,7 @@ func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorag
 			go func() { _ = doUmount(mp, true) }()
 		}
 	}()
+	return external, nil
 }
 func launchMount(c *cli.Context, mp string, conf *vfs.Config) error {
 	increaseRlimit()
