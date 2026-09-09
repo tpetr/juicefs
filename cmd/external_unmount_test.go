@@ -28,6 +28,8 @@ import (
 
 	"github.com/juicedata/juicefs/pkg/chunk"
 	"github.com/juicedata/juicefs/pkg/fusefd"
+	"github.com/juicedata/juicefs/pkg/meta"
+	"github.com/juicedata/juicefs/pkg/object"
 	"github.com/juicedata/juicefs/pkg/vfs"
 )
 
@@ -73,6 +75,91 @@ func TestExternalUnmountLifecycle(t *testing.T) {
 				t.Fatalf("mount result is %v, want %q", result, test.wantResult)
 			}
 		})
+	}
+}
+
+func TestExternalCheckpointIsSerializedWithUnmount(t *testing.T) {
+	var operations []string
+	u := &externalUnmount{
+		checkpoint: func(destination string) error {
+			operations = append(operations, "checkpoint:"+destination)
+			return nil
+		},
+		flush: func() error {
+			operations = append(operations, "flush")
+			return nil
+		},
+		unmount: func(bool) error {
+			operations = append(operations, "unmount")
+			return nil
+		},
+	}
+	if err := u.handle(fusefd.ControlRequest{Operation: "checkpoint", Destination: "/checkpoints/meta.bin"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.request(false); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(operations, ","); got != "checkpoint:/checkpoints/meta.bin,flush,unmount" {
+		t.Fatalf("operation order: %s", got)
+	}
+}
+
+func TestSQLiteCheckpointLoadsAndLeavesVFSUsable(t *testing.T) {
+	dir := t.TempDir()
+	uri := "sqlite3://" + filepath.Join(dir, "source.db")
+	source := meta.NewClient(uri, meta.DefaultConf())
+	if err := source.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(&meta.Format{Name: "checkpoint", BlockSize: 4096, Capacity: 1 << 30}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Load(true); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := object.CreateStorage("mem", "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := &vfs.Config{Meta: meta.DefaultConf(), Chunk: &chunk.Config{BlockSize: 4096}}
+	v := vfs.NewVFS(conf, source, chunk.NewCachedStore(storage, *conf.Chunk, nil), nil, nil)
+	ctx := vfs.NewLogContext(meta.NewContext(1, 0, []uint32{0}))
+	if _, eno := v.Mkdir(ctx, meta.RootInode, "before", 0755, 0); eno != 0 {
+		t.Fatalf("mkdir before checkpoint: %s", eno)
+	}
+	destination := filepath.Join(dir, "checkpoint.bin")
+	if err := checkpointSQLite(v, source, destination, dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkpointSQLite(v, source, destination, dir, nil); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("existing destination error: %v", err)
+	}
+	if err := checkpointSQLite(v, source, filepath.Join(dir, "outside", "metadata.bin"), dir, nil); err == nil {
+		t.Fatal("checkpoint accepted an unsafe destination")
+	}
+	f, err := os.Open(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	destinationMeta := meta.NewClient("sqlite3://"+filepath.Join(dir, "destination.db"), meta.DefaultConf())
+	if err := destinationMeta.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := destinationMeta.LoadMetaV2(meta.Background(), f, nil); err != nil {
+		t.Fatal(err)
+	}
+	var ino meta.Ino
+	var attr meta.Attr
+	if eno := destinationMeta.Lookup(meta.Background(), meta.RootInode, "before", &ino, &attr, true); eno != 0 {
+		t.Fatalf("checkpoint is missing prior write: %s", eno)
+	}
+	if _, eno := v.Mkdir(ctx, meta.RootInode, "after", 0755, 0); eno != 0 {
+		t.Fatalf("mkdir after checkpoint: %s", eno)
+	}
+	if err := checkpointSQLite(v, source, filepath.Join(dir, "checkpoint-2.bin"), dir, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -192,7 +279,7 @@ func TestPreopenedMountAndUmountUseSameDefaultControlPath(t *testing.T) {
 	external, err := newExternalUnmount(controlPath, func() error { return nil }, func(bool) error {
 		requested <- struct{}{}
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +295,47 @@ func TestPreopenedMountAndUmountUseSameDefaultControlPath(t *testing.T) {
 	case <-requested:
 	case <-time.After(time.Second):
 		t.Fatal("default control socket did not receive the request")
+	}
+}
+
+func TestPreopenedCheckpointCommandSkipsMountConfig(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pre-opened FUSE mode is Linux-only")
+	}
+	dir, err := os.MkdirTemp("/tmp", "jfs-checkpoint-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	controlPath := filepath.Join(dir, "control.sock")
+	requested := make(chan string, 1)
+	server, err := fusefd.ServeControlRequests(controlPath, func(request fusefd.ControlRequest) error {
+		if !request.IsCheckpoint() {
+			t.Fatalf("unexpected request: %+v", request)
+		}
+		requested <- request.Destination
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	for _, name := range []string{"JFS_SUPER_COMM", "_FUSE_FD_COMM", "JFS_SUPERVISOR", "_FUSE_STATE_PATH"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv(fusefd.Env, filepath.Join(dir, "bootstrap.sock"))
+	t.Setenv(fusefd.ControlEnv, controlPath)
+	destination := filepath.Join(dir, "metadata.bin")
+	if err := Main([]string{"juicefs", "checkpoint", destination}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-requested:
+		if got != destination {
+			t.Fatalf("destination: %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("foreground mount process did not receive checkpoint")
 	}
 }
 

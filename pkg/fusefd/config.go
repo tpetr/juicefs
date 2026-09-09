@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	Env        = "JFS_PREOPENED_FUSE_FD_COMM"
-	ControlEnv = "JFS_PREOPENED_FUSE_FD_CONTROL"
+	Env              = "JFS_PREOPENED_FUSE_FD_COMM"
+	ControlEnv       = "JFS_PREOPENED_FUSE_FD_CONTROL"
+	CheckpointDirEnv = "JFS_PREOPENED_FUSE_FD_CHECKPOINT_DIR"
 )
 
 // Socket returns the opt-in bootstrap socket and rejects state-transfer settings.

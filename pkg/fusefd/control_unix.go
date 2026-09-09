@@ -24,20 +24,27 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	controlOperation  = "clean-unmount"
-	controlMaxMessage = 4096
-	ControlTimeout    = 5 * time.Minute
+	controlOperation    = "clean-unmount"
+	checkpointOperation = "checkpoint"
+	controlMaxMessage   = 4096
+	ControlTimeout      = 5 * time.Minute
 )
 
-type controlRequest struct {
-	Operation string `json:"operation"`
-	Force     bool   `json:"force,omitempty"`
+// ControlRequest is the authenticated request accepted by the private control socket.
+type ControlRequest struct {
+	Operation   string `json:"operation"`
+	Force       bool   `json:"force,omitempty"`
+	Destination string `json:"destination,omitempty"`
 }
+
+func (r ControlRequest) IsUnmount() bool    { return r.Operation == controlOperation }
+func (r ControlRequest) IsCheckpoint() bool { return r.Operation == checkpointOperation }
 
 type controlResponse struct {
 	Error string `json:"error,omitempty"`
@@ -52,11 +59,21 @@ type ControlServer struct {
 
 // ServeControl creates a mode-0600 Unix socket and starts accepting requests.
 func ServeControl(path string, handler func(bool) error) (*ControlServer, error) {
+	return ServeControlRequests(path, func(request ControlRequest) error {
+		if request.Operation != controlOperation {
+			return fmt.Errorf("unsupported clean-unmount operation %q", request.Operation)
+		}
+		return handler(request.Force)
+	})
+}
+
+// ServeControlRequests creates a mode-0600 Unix socket and dispatches authenticated requests.
+func ServeControlRequests(path string, handler func(ControlRequest) error) (*ControlServer, error) {
 	if path == "" {
 		return nil, fmt.Errorf("clean-unmount control socket is empty")
 	}
 	if handler == nil {
-		return nil, fmt.Errorf("clean-unmount handler is nil")
+		return nil, fmt.Errorf("control handler is nil")
 	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -89,7 +106,7 @@ func ServeControl(path string, handler func(bool) error) (*ControlServer, error)
 	return server, nil
 }
 
-func (s *ControlServer) serve(handler func(bool) error) {
+func (s *ControlServer) serve(handler func(ControlRequest) error) {
 	for {
 		conn, err := s.listener.AcceptUnix()
 		if err != nil {
@@ -99,19 +116,16 @@ func (s *ControlServer) serve(handler func(bool) error) {
 	}
 }
 
-func handleControlConnection(conn *net.UnixConn, handler func(bool) error) {
+func handleControlConnection(conn *net.UnixConn, handler func(ControlRequest) error) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(ControlTimeout))
-	var request controlRequest
+	var request ControlRequest
 	err := authorizeControl(conn)
 	if err == nil {
 		err = json.NewDecoder(io.LimitReader(conn, controlMaxMessage)).Decode(&request)
 	}
-	if err == nil && request.Operation != controlOperation {
-		err = fmt.Errorf("unsupported clean-unmount operation %q", request.Operation)
-	}
 	if err == nil {
-		err = handler(request.Force)
+		err = handler(request)
 	}
 	response := controlResponse{}
 	if err != nil {
@@ -122,26 +136,38 @@ func handleControlConnection(conn *net.UnixConn, handler func(bool) error) {
 
 // RequestUnmount asks the foreground mount process to flush and unmount.
 func RequestUnmount(path string, force bool, timeout time.Duration) error {
+	return requestControl(path, ControlRequest{Operation: controlOperation, Force: force}, timeout, "clean-unmount")
+}
+
+// RequestCheckpoint asks the foreground mount process for a binary metadata checkpoint.
+func RequestCheckpoint(path, destination string, timeout time.Duration) error {
+	if destination == "" {
+		return fmt.Errorf("checkpoint destination is empty")
+	}
+	return requestControl(path, ControlRequest{Operation: checkpointOperation, Destination: destination}, timeout, "checkpoint")
+}
+
+func requestControl(path string, request ControlRequest, timeout time.Duration, name string) error {
 	if timeout <= 0 {
-		return fmt.Errorf("clean-unmount timeout must be positive")
+		return fmt.Errorf("%s timeout must be positive", name)
 	}
 	conn, err := net.DialTimeout("unix", path, timeout)
 	if err != nil {
-		return fmt.Errorf("connect clean-unmount control socket %q: %w", path, err)
+		return fmt.Errorf("connect %s control socket %q: %w", name, path, err)
 	}
 	defer conn.Close()
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return fmt.Errorf("set clean-unmount control deadline: %w", err)
+		return fmt.Errorf("set %s control deadline: %w", name, err)
 	}
-	if err := json.NewEncoder(conn).Encode(&controlRequest{Operation: controlOperation, Force: force}); err != nil {
-		return fmt.Errorf("send clean-unmount request: %w", err)
+	if err := json.NewEncoder(conn).Encode(&request); err != nil {
+		return fmt.Errorf("send %s request: %w", name, err)
 	}
 	var response controlResponse
 	if err := json.NewDecoder(io.LimitReader(conn, controlMaxMessage)).Decode(&response); err != nil {
-		return fmt.Errorf("receive clean-unmount response: %w", err)
+		return fmt.Errorf("receive %s response: %w", name, err)
 	}
 	if response.Error != "" {
-		return fmt.Errorf("clean unmount failed: %s", response.Error)
+		return fmt.Errorf("%s failed: %s", strings.ReplaceAll(name, "-", " "), response.Error)
 	}
 	return nil
 }

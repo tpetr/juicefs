@@ -24,17 +24,18 @@ import (
 )
 
 type externalUnmount struct {
-	mu        sync.Mutex
-	flush     func() error
-	unmount   func(bool) error
-	server    *fusefd.ControlServer
-	completed bool
-	result    error
+	mu         sync.Mutex
+	flush      func() error
+	unmount    func(bool) error
+	checkpoint func(string) error
+	server     *fusefd.ControlServer
+	completed  bool
+	result     error
 }
 
-func newExternalUnmount(path string, flush func() error, unmount func(bool) error) (*externalUnmount, error) {
-	u := &externalUnmount{flush: flush, unmount: unmount}
-	server, err := fusefd.ServeControl(path, u.request)
+func newExternalUnmount(path string, flush func() error, unmount func(bool) error, checkpoint func(string) error) (*externalUnmount, error) {
+	u := &externalUnmount{flush: flush, unmount: unmount, checkpoint: checkpoint}
+	server, err := fusefd.ServeControlRequests(path, u.handle)
 	if err != nil {
 		return nil, err
 	}
@@ -43,13 +44,29 @@ func newExternalUnmount(path string, flush func() error, unmount func(bool) erro
 }
 
 func (u *externalUnmount) request(force bool) error {
+	return u.handle(fusefd.ControlRequest{Operation: "clean-unmount", Force: force})
+}
+
+func (u *externalUnmount) handle(request fusefd.ControlRequest) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if request.IsCheckpoint() {
+		if u.completed {
+			return errors.New("mount is already unmounted")
+		}
+		if u.checkpoint == nil {
+			return errors.New("checkpoint is not configured")
+		}
+		return u.checkpoint(request.Destination)
+	}
+	if !request.IsUnmount() {
+		return errors.New("unsupported control operation")
+	}
 	if u.completed {
 		return u.result
 	}
 	flushErr := u.flush()
-	unmountErr := u.unmount(force)
+	unmountErr := u.unmount(request.Force)
 	err := errors.Join(flushErr, unmountErr)
 	// A successful proxy request will stop the FUSE serve loop. Preserve any
 	// flush failure so the foreground mount process exits unsuccessfully.

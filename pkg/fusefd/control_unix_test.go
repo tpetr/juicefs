@@ -158,3 +158,31 @@ func TestControlRequestErrorsAndTimeouts(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckpointRequestFailureIsRetryable(t *testing.T) {
+	path := shortSocketPath(t, "checkpoint.sock")
+	var calls int
+	server, err := ServeControlRequests(path, func(request ControlRequest) error {
+		if !request.IsCheckpoint() || request.Destination != "/checkpoints/meta.bin" {
+			t.Fatalf("unexpected request: %+v", request)
+		}
+		calls++
+		if calls == 1 {
+			return errors.New("dump failed")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	if err := RequestCheckpoint(path, "/checkpoints/meta.bin", time.Second); err == nil || !strings.Contains(err.Error(), "dump failed") {
+		t.Fatalf("first checkpoint error: %v", err)
+	}
+	if err := RequestCheckpoint(path, "/checkpoints/meta.bin", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls: %d", calls)
+	}
+}

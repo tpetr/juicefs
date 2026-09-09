@@ -26,12 +26,28 @@ import (
 const ControlTimeout = 5 * time.Minute
 
 type ControlServer struct{}
+type ControlRequest struct {
+	Operation   string `json:"operation"`
+	Force       bool   `json:"force,omitempty"`
+	Destination string `json:"destination,omitempty"`
+}
+
+func (r ControlRequest) IsUnmount() bool    { return false }
+func (r ControlRequest) IsCheckpoint() bool { return false }
 
 func ServeControl(path string, handler func(bool) error) (*ControlServer, error) {
 	return nil, fmt.Errorf("%s is supported only on Linux", Env)
 }
 
+func ServeControlRequests(path string, handler func(ControlRequest) error) (*ControlServer, error) {
+	return nil, fmt.Errorf("%s is supported only on Linux", Env)
+}
+
 func RequestUnmount(path string, force bool, timeout time.Duration) error {
+	return fmt.Errorf("%s is supported only on Linux", Env)
+}
+
+func RequestCheckpoint(path, destination string, timeout time.Duration) error {
 	return fmt.Errorf("%s is supported only on Linux", Env)
 }
 

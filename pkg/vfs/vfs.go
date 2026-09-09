@@ -239,6 +239,8 @@ func get_filetype(mode uint16) uint8 {
 }
 
 func (v *VFS) Mknod(ctx Context, parent Ino, name string, mode uint16, cumask uint16, rdev uint32) (entry *meta.Entry, err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() {
 		logit(ctx, "mknod", err, "(%d,%s,%s:0%04o,0x%08X):%s", parent, name, smode(mode), mode, rdev, (*Entry)(entry))
 	}()
@@ -271,6 +273,8 @@ func (v *VFS) Unlink(ctx Context, parent Ino, name string) (err syscall.Errno) {
 }
 
 func (v *VFS) doUnlink(ctx Context, parent Ino, name string, skipTrash bool) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() { logit(ctx, "unlink", err, "(%d,%s)", parent, name) }()
 	if parent == rootID && IsSpecialName(name) {
 		err = syscall.EPERM
@@ -288,6 +292,8 @@ func (v *VFS) doUnlink(ctx Context, parent Ino, name string, skipTrash bool) (er
 }
 
 func (v *VFS) Mkdir(ctx Context, parent Ino, name string, mode uint16, cumask uint16) (entry *meta.Entry, err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() {
 		logit(ctx, "mkdir", err, "(%d,%s,%s:0%04o):%s", parent, name, smode(mode), mode, (*Entry)(entry))
 	}()
@@ -311,6 +317,8 @@ func (v *VFS) Mkdir(ctx Context, parent Ino, name string, mode uint16, cumask ui
 }
 
 func (v *VFS) Rmdir(ctx Context, parent Ino, name string) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() { logit(ctx, "rmdir", err, "(%d,%s)", parent, name) }()
 	if len(name) > maxName {
 		err = syscall.ENAMETOOLONG
@@ -324,6 +332,8 @@ func (v *VFS) Rmdir(ctx Context, parent Ino, name string) (err syscall.Errno) {
 }
 
 func (v *VFS) Symlink(ctx Context, path string, parent Ino, name string) (entry *meta.Entry, err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() {
 		logit(ctx, "symlink", err, "(%d,%s,%s):%s", parent, name, path, (*Entry)(entry))
 	}()
@@ -353,6 +363,8 @@ func (v *VFS) Readlink(ctx Context, ino Ino) (path []byte, err syscall.Errno) {
 }
 
 func (v *VFS) Rename(ctx Context, parent Ino, name string, newparent Ino, newname string, flags uint32) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() {
 		logit(ctx, "rename", err, "(%d,%s,%d,%s,%d)", parent, name, newparent, newname, flags)
 	}()
@@ -381,6 +393,8 @@ func (v *VFS) Rename(ctx Context, parent Ino, name string, newparent Ino, newnam
 }
 
 func (v *VFS) Link(ctx Context, ino Ino, newparent Ino, newname string) (entry *meta.Entry, err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() {
 		logit(ctx, "link", err, "(%d,%d,%s):%s", ino, newparent, newname, (*Entry)(entry))
 	}()
@@ -504,6 +518,8 @@ func (v *VFS) Releasedir(ctx Context, ino Ino, fh uint64) int {
 const O_TMPFILE = 020000000
 
 func (v *VFS) Create(ctx Context, parent Ino, name string, mode uint16, cumask uint16, flags uint32) (entry *meta.Entry, fh uint64, err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() {
 		logit(ctx, "create", err, "(%d,%s,%s:0%04o):%s [fh:%d]", parent, name, smode(mode), mode, (*Entry)(entry), fh)
 	}()
@@ -594,6 +610,8 @@ func (v *VFS) Open(ctx Context, ino Ino, flags uint32) (entry *meta.Entry, fh ui
 }
 
 func (v *VFS) Truncate(ctx Context, ino Ino, size int64, fh uint64, attr *Attr) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	// defer func() { logit(ctx, "truncate (%d,%d): %s", ino, size, strerr(err)) }()
 	if IsSpecialNode(ino) {
 		err = syscall.EPERM
@@ -645,6 +663,8 @@ func (v *VFS) ReleaseHandler(ino Ino, fh uint64) {
 }
 
 func (v *VFS) Release(ctx Context, ino Ino, fh uint64) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	var err syscall.Errno
 	defer func() { logit(ctx, "release", err, "(%d,%d)", ino, fh) }()
 	if IsSpecialNode(ino) {
@@ -799,6 +819,8 @@ func (v *VFS) Read(ctx Context, ino Ino, buf []byte, off uint64, fh uint64) (n i
 }
 
 func (v *VFS) Write(ctx Context, ino Ino, buf []byte, off, fh uint64) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	size := uint64(len(buf))
 	if ino == controlInode && runtime.GOOS == "darwin" {
 		fh = v.getControlHandle(ctx.Pid())
@@ -863,6 +885,8 @@ func (v *VFS) Write(ctx Context, ino Ino, buf []byte, off, fh uint64) (err sysca
 }
 
 func (v *VFS) Fallocate(ctx Context, ino Ino, mode uint8, off, size int64, fh uint64) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() { logit(ctx, "fallocate", err, "(%d,%d,%d,%d)", ino, mode, off, size) }()
 	if off < 0 || size <= 0 {
 		err = syscall.EINVAL
@@ -913,6 +937,8 @@ func (v *VFS) Fallocate(ctx Context, ino Ino, mode uint8, off, size int64, fh ui
 }
 
 func (v *VFS) CopyFileRange(ctx Context, nodeIn Ino, fhIn, offIn uint64, nodeOut Ino, fhOut, offOut, size uint64, flags uint32) (copied uint64, err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() {
 		logit(ctx, "copy_file_range", err, "(%d,%d,%d,%d,%d,%d)", nodeIn, offIn, nodeOut, offOut, size, flags)
 	}()
@@ -989,6 +1015,8 @@ func (v *VFS) CopyFileRange(ctx Context, nodeIn Ino, fhIn, offIn uint64, nodeOut
 }
 
 func (v *VFS) Flush(ctx Context, ino Ino, fh uint64, lockOwner uint64) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	if ino == controlInode && runtime.GOOS == "darwin" {
 		fh = v.getControlHandle(ctx.Pid())
 		defer v.releaseControlHandle(ctx.Pid())
@@ -1034,6 +1062,8 @@ func (v *VFS) Flush(ctx Context, ino Ino, fh uint64, lockOwner uint64) (err sysc
 }
 
 func (v *VFS) Fsync(ctx Context, ino Ino, datasync int, fh uint64) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() { logit(ctx, "fsync", err, "(%d,%d)", ino, datasync) }()
 	if IsSpecialNode(ino) {
 		return
@@ -1085,6 +1115,8 @@ func isXattrEnabled(conf *Config, name string) bool {
 }
 
 func (v *VFS) SetXattr(ctx Context, ino Ino, name string, value []byte, flags uint32) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() { logit(ctx, "setxattr", err, "(%d,%s,%d,%d)", ino, name, len(value), flags) }()
 	if IsSpecialNode(ino) {
 		err = syscall.EPERM
@@ -1187,6 +1219,8 @@ func (v *VFS) ListXattr(ctx Context, ino Ino, size int) (data []byte, err syscal
 }
 
 func (v *VFS) RemoveXattr(ctx Context, ino Ino, name string) (err syscall.Errno) {
+	v.mutationGate.RLock()
+	defer v.mutationGate.RUnlock()
 	defer func() { logit(ctx, "removexattr", err, "(%d,%s)", ino, name) }()
 	if IsSpecialNode(ino) {
 		err = syscall.EPERM
@@ -1230,6 +1264,7 @@ type VFS struct {
 	reader          DataReader
 	writer          DataWriter
 	cacheFiller     *CacheFiller
+	mutationGate    sync.RWMutex
 
 	handles   map[Ino][]*handle
 	handleIno map[uint64]Ino
@@ -1334,6 +1369,16 @@ func (v *VFS) FlushAll(path string) (err error) {
 		return nil
 	}
 	return v.dumpAllHandles(path)
+}
+
+// Checkpoint blocks local metadata mutations while fn observes a flushed filesystem.
+func (v *VFS) Checkpoint(fn func() error) error {
+	v.mutationGate.Lock()
+	defer v.mutationGate.Unlock()
+	if err := v.FlushAll(""); err != nil {
+		return err
+	}
+	return fn()
 }
 
 func initVFSMetrics(v *VFS, writer DataWriter, reader DataReader, registerer prometheus.Registerer) {
