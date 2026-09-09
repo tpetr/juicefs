@@ -73,6 +73,8 @@ FD 必须对应尚未读取内核 `FUSE_INIT` 请求的新挂载连接。JuiceFS
 
 此模式使用三个不同的端点。`JFS_PREOPENED_FUSE_FD_COMM` 是 FD 交接套接字；其同级路径 `<handoff>.control` 保留给 CSI 驱动的、经过认证的节点侧卸载代理。前台 JuiceFS 挂载进程默认在 `<handoff>.juicefs-control` 创建权限为 `0600` 的私有清理卸载套接字。仍可通过 `JFS_PREOPENED_FUSE_FD_CONTROL` 显式指定自定义 JuiceFS 控制路径；该路径必须是不同且可写的套接字路径，不能等于 FD 交接套接字或驱动的 `<handoff>.control` 套接字。挂载进程和 `umount` 进程会推导出同一个默认路径。`juicefs umount --flush MOUNTPOINT` 会向 JuiceFS 控制套接字发送请求，而不读取 `MOUNTPOINT/.config`。挂载进程会刷新待处理数据，调用 `fusermount -u MOUNTPOINT`（该程序可以是 CSI 驱动提供的认证代理），等待 FUSE 服务循环停止，然后关闭元数据会话和对象存储并退出。`SIGTERM` 使用相同的清理流程。正常退出时会删除 JuiceFS 控制套接字。
 
+对于使用 **SQLite 元数据** 的 restartable-init sidecar，可将 `JFS_PREOPENED_FUSE_FD_CHECKPOINT_DIR` 设置为工作负载拥有的绝对共享可写目录。SDK 随后可执行 `juicefs checkpoint /absolute/checkpoint-dir/metadata.bin`。该命令使用 `JFS_PREOPENED_FUSE_FD_CONTROL`，不会读取 `MOUNTPOINT/.config`，且只接受配置目录中直接包含的目标文件。前台进程会将请求与卸载和关闭串行化，阻塞本地修改，刷新数据和 writeback 暂存文件，将单线程 SQLite 二进制快照写入临时文件、fsync 后原子发布。成功的 checkpoint 不会调用 `fusermount`、卸载文件系统、关闭元数据会话或对象存储、也不会停止前台进程。可重复执行 checkpoint，之后仍可正常清理卸载。其他元数据引擎会拒绝在线 checkpoint，因为它们不能提供所需的一致实时二进制快照。
+
 此模式直接以前台服务运行，跳过重启监督进程、挂载点准备及 INIT 前的就绪检查，不允许 `--background` 和 `--update-fstab`。挂载点参数标识外部挂载，驱动负责挂载、就绪检查、卸载和重启策略。驱动设置的内核挂载选项（如 `allow_other`、`default_permissions` 和 `max_read`）必须与 JuiceFS 配置一致。进程重启需要新的挂载连接，不能恢复已初始化的会话。SIGTERM、SIGINT 和 SIGHUP 会刷写数据并退出，不执行本地卸载或平滑重启。
 
 不能与 `JFS_SUPER_COMM`、`_FUSE_FD_COMM`、`JFS_SUPERVISOR` 或 `_FUSE_STATE_PATH` 同时使用。这些设置属于独立的平滑升级/状态传递流程，该流程交换两个 FD 及序列化的 `InitIn` 状态。

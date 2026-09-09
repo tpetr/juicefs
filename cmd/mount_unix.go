@@ -942,6 +942,7 @@ func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorag
 	}
 	var external *externalUnmount
 	if controlPath != "" {
+		checkpointDir := os.Getenv(fusefd.CheckpointDirEnv)
 		external, err = newExternalUnmount(controlPath, func() error {
 			if err := v.FlushAll(""); err != nil {
 				return err
@@ -955,6 +956,16 @@ func installHandler(m meta.Meta, mp string, v *vfs.VFS, blob object.ObjectStorag
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			return doUmountContext(ctx, mp, force)
+		}, func(destination string) error {
+			if checkpointDir == "" {
+				return fmt.Errorf("checkpoint requires %s", fusefd.CheckpointDirEnv)
+			}
+			return checkpointSQLite(v, m, destination, checkpointDir, func() error {
+				if v.Conf.Chunk == nil || !v.Conf.Chunk.Writeback {
+					return nil
+				}
+				return waitWritebackCompleteFor(path.Join(v.Conf.Chunk.CacheDir, "rawstaging"), 2*time.Minute)
+			})
 		})
 		if err != nil {
 			return nil, err
